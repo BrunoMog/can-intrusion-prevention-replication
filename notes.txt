@@ -1,0 +1,29 @@
+Notas para reprodução do artigo:
+
+- apenas os campos data contendo 8 bytes são considerados para a predição
+
+- o artigo não fala nada quanto a um pré-processamento dos dados, mas considerando o domínio do dados, sendo bytes tem valores de 0 a 255 e uma normalização dividindo por 255 pode ser uma boa prática para melhorar a performance do modelo
+
+- os modelos utilizados no artigo foram OCSVM e Isolation Forest
+
+- foram utilizados 3 datasets na análise, tanto fuzzy quanto gear dataset e rpm dataset.
+
+- foram separados em 3 conjuntos de treino, validação e teste
+
+- para evitar overfitting, o artigo utilizou validação cruzada com 10 folds
+
+- os conjuntos de treino e validação foram escolhidos randomicamente, selecionando 250000 amostras de frames normais, e dividindo eles em 10 folds de 25000 amostras cada, sendo 9 folds usados para treino e 1 usando para validação em conjunto com mais 25000 amostras maliciosa randomicamente
+
+- os conjuntos de treinamento apenas contém frames normais, enquanto os conjuntos de validação e teste contêm tanto frames normais quanto maliciosos
+
+- todas as amostras restantes foram utilizadas no conjunto de teste
+
+- como a proposta do artigo é detectar anomalias com os N primeiros bytes de cada frame, tanto para OCSVM quanto para o Isolation Forest foram treinados 8 modelos, cada um utilizando os N primeiros bytes de cada frame, sendo N variando de 1 a 8
+
+- os hyperparâmetros dos modelos foram otimizados usando uma validação cruzada grid search em uma grade de parâmetros, e para o caso do OCSVM o kernel utilizado foi o RBF
+
+- o artigo não especifica o grid de parâmetros utilizado na otimização
+
+- as métricas utilizadas para avaliar a performance dos modelos foram acurácia, precisão e recall
+
+- para comparação entre os modelos com o objetivo de decidir os N bytes para cada dataset, o artigo utilizou ANOVA

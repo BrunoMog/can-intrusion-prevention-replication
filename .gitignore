@@ -1,0 +1,96 @@
+# ==============================================================================
+# .gitignore - Projeto CIN0114 (UFPE / CIn)
+# Replicação de Artigo: CAN Intrusion Prevention System
+# ==============================================================================
+
+# Datasets & Arquivos Compactados (HCRL Car Hacking Dataset ~1.7GB)
+# Mantém a pasta datasets/ versionada através do .gitkeep, mas ignora os dados pesados
+datasets/*
+!datasets/.gitkeep
+*.csv
+*.tsv
+*.zip
+*.7z
+*.tar.gz
+*.rar
+*.gz
+*.bz2
+
+# Caches de Folds e Divisões de Dados (gerados automaticamente pelo utils.py ~84MB)
+splits_cache/*
+!splits_cache/.gitkeep
+*.npz
+*.npy
+
+# Resultados Experimentais, Modelos Serializados e Logs
+results/*
+!results/.gitkeep
+models/*
+!models/.gitkeep
+logs/*
+!logs/.gitkeep
+*.joblib
+*.pkl
+*.pickle
+*.log
+slurm-*.out
+slurm-*.err
+
+# Byte-compiled / Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribuição / Empacotamento
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Ambientes Virtuais (Virtualenvs)
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# IDEs e Editores
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-workspace
+*.sublime-project
+
+# Arquivos de Sistema Operacional
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Executáveis e Binários
+test
+*.out
+*.exe

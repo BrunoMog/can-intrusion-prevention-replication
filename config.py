@@ -1,0 +1,87 @@
+"""
+================================================================================
+Módulo: config.py
+Projeto: CIN0114 - Replicação de Artigo CAN Intrusion Prevention
+Artigo: "An Efficient Intrusion Prevention System for CAN:
+         Hindering Cyber-Attacks With a Low-Cost Platform" (IEEE Access, 2021)
+================================================================================
+Configurações de experimentos, grades de hiperparâmetros (ParamGrid),
+definição de modelos, diretórios e métricas de otimização.
+================================================================================
+"""
+
+import os
+
+# Datasets avaliados no artigo
+DATASETS = ['Fuzzing', 'Drive Gear', 'RPM Gauge']
+
+# Famílias de modelos e número de bytes de entrada (N = 1 a 8)
+MODEL_FAMILIES = ['OCSVM', 'iForest']
+BYTE_CONFIGS = [1, 2, 3, 4, 5, 6, 7, 8]
+
+# Métrica principal para seleção do melhor modelo na validação cruzada
+# 'Accuracy (%)' | 'F1-Score (%)' | 'Precision (%)' | 'Recall (%)' | 'AUC-ROC (%)'
+PRIMARY_METRIC = 'Accuracy (%)'
+
+# Diretórios padrão
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+RESULTS_DIR = os.path.join(BASE_DIR, 'results')
+LOGS_DIR = os.path.join(BASE_DIR, 'logs')
+MODELS_DIR = os.path.join(BASE_DIR, 'models')
+SPLITS_CACHE_DIR = os.path.join(BASE_DIR, 'splits_cache')
+
+# Semente pseudoaleatória padrão
+DEFAULT_SEED = 42
+DEFAULT_CV_FOLDS = 10
+
+# ==============================================================================
+# GRADES DE HIPERPARÂMETROS (PARAM GRIDS)
+# ==============================================================================
+
+# Grade Completa (Ideal para execuções no Cluster HPC / SLURM)
+PARAM_GRID_FULL = {
+    'OCSVM': {
+        'kernel': ['rbf'],
+        'nu': [0.01, 0.03, 0.05, 0.1],
+        'gamma': ['scale', 'auto', 0.1, 0.5, 1.0]
+    },
+    'iForest': {
+        'n_estimators': [50, 100, 200],
+        'max_samples': [128, 256, 512, 'auto'],
+        'contamination': ['auto', 0.01, 0.05, 0.1]
+    }
+}
+
+# Grade Padrão (Balanceada para boa exploração e tempo de execução viável)
+PARAM_GRID_DEFAULT = {
+    'OCSVM': {
+        'kernel': ['rbf'],
+        'nu': [0.01, 0.05],
+        'gamma': ['scale', 0.1, 0.5]
+    },
+    'iForest': {
+        'n_estimators': [50, 100],
+        'max_samples': [256, 512],
+        'contamination': ['auto', 0.05]
+    }
+}
+
+# Grade Rápida / Smoke Test (Para testes de integridade, pipelines locais rápidos)
+PARAM_GRID_SMOKE = {
+    'OCSVM': {
+        'kernel': ['rbf'],
+        'nu': [0.05],
+        'gamma': ['scale']
+    },
+    'iForest': {
+        'n_estimators': [50],
+        'max_samples': [256],
+        'contamination': ['auto']
+    }
+}
+
+GRID_PRESETS = {
+    'full': PARAM_GRID_FULL,
+    'default': PARAM_GRID_DEFAULT,
+    'smoke': PARAM_GRID_SMOKE
+}
