@@ -84,11 +84,14 @@ mkdir -p results logs splits_cache
 #   --folds 10: validação cruzada oficial de 10 folds
 #   --n_jobs: usa todos os núcleos de CPU alocados
 #   (O modo --resume está ativo por padrão, garantindo que timeouts no cluster possam ser retomados)
+# Permite configurar a grade via variável de ambiente (padrão: refined)
+GRID_PRESET="${GRID:-refined}"
+
 eval python run_experiments.py \
     $DATASET_ARG \
     --models OCSVM iForest \
     --bytes 1 2 3 4 5 6 7 8 \
-    --grid full \
+    --grid "$GRID_PRESET" \
     --folds 10 \
     --n_jobs ${SLURM_CPUS_PER_TASK:-16}
 

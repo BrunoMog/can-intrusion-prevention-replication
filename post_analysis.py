@@ -272,6 +272,18 @@ def generate_paper_tables(df_test: pd.DataFrame):
                 'F1-Score (%)': f"{r['test_f1']:.2f}%"
             })
 
+        # Adiciona também o melhor modelo geral da replicação para comparação completa
+        sub_all = df_test[df_test['dataset'] == dname].sort_values('test_accuracy', ascending=False)
+        if not sub_all.empty and sub_all.iloc[0]['model_name'] != 'iForest_5F':
+            best_m = sub_all.iloc[0]
+            comp_rows.append({
+                'Detection Mechanism': f"Nossa Replicação (Melhor: {best_m['model_name']})",
+                'Accuracy (%)': f"{best_m['test_accuracy']:.2f}%",
+                'Precision (%)': f"{best_m['test_precision']:.2f}%",
+                'Recall (%)': f"{best_m['test_recall']:.2f}%",
+                'F1-Score (%)': f"{best_m['test_f1']:.2f}%"
+            })
+
         print(pd.DataFrame(comp_rows).to_string(index=False))
 
 

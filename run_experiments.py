@@ -165,12 +165,17 @@ class CheckpointManager:
         self.completed_cv_keys.add(key)
 
     def append_test_result(self, row_dict: Dict[str, Any]):
-        """Grava uma linha no CSV de teste final com descarga síncrona no disco."""
-        df_row = pd.DataFrame([row_dict])
-        with open(self.test_csv_path, 'a', encoding='utf-8') as f:
-            df_row.to_csv(f, header=False, index=False)
-            f.flush()
-            os.fsync(f.fileno())
+        """Grava ou atualiza uma linha no CSV de teste final com descarga síncrona no disco."""
+        if os.path.exists(self.test_csv_path) and os.path.getsize(self.test_csv_path) > 0:
+            df = pd.read_csv(self.test_csv_path)
+            mask = (df['dataset'] == row_dict['dataset']) & (df['model_name'] == row_dict['model_name'])
+            if mask.any():
+                df = df[~mask]
+            df_new = pd.concat([df, pd.DataFrame([row_dict])], ignore_index=True)
+            df_new.to_csv(self.test_csv_path, index=False)
+        else:
+            df_row = pd.DataFrame([row_dict])
+            df_row.to_csv(self.test_csv_path, index=False)
         key = (str(row_dict['dataset']), str(row_dict['model_name']))
         self.completed_test_keys.add(key)
 
@@ -316,6 +321,7 @@ def run_experiment_pipeline(
     log_dir: str = config.LOGS_DIR,
     models_dir: str = config.MODELS_DIR,
     save_models: bool = False,
+    force_test: bool = False,
     random_state: int = config.DEFAULT_SEED
 ):
     """
@@ -435,21 +441,38 @@ def run_experiment_pipeline(
                 # ==============================================================
                 # SELEÇÃO DO MODELO ÓTIMO E AVALIAÇÃO NO TESTE BLINDADO
                 # ==============================================================
-                if evaluate_test and not cp_manager.is_test_completed(dname, model_name):
-                    logger.info(f"Identificando melhores hiperparâmetros para {model_name} no dataset {dname}...")
-                    # Lê o CSV de resultados para extrair o melhor de acordo com a métrica primária
+                if evaluate_test:
                     df_cv_all = pd.read_csv(cv_csv_path)
                     sub_cv = df_cv_all[(df_cv_all['dataset'] == dname) & (df_cv_all['model_name'] == model_name)]
                     if sub_cv.empty:
                         logger.warning(f"Nenhum resultado de CV encontrado para {dname} - {model_name}.")
                         continue
 
-                    best_row = sub_cv.sort_values('mean_val_accuracy', ascending=False).iloc[0]
+                    best_row = sub_cv.sort_values(['mean_val_accuracy', 'mean_val_f1'], ascending=[False, False]).iloc[0]
                     best_params = json.loads(best_row['params_json'])
                     best_val_acc = float(best_row['mean_val_accuracy'])
                     best_val_f1 = float(best_row['mean_val_f1'])
                     best_val_auc = float(best_row['mean_val_aucroc'])
 
+                    needs_test = force_test or not cp_manager.is_test_completed(dname, model_name)
+                    if not needs_test and os.path.exists(test_csv_path):
+                        try:
+                            df_test_prev = pd.read_csv(test_csv_path)
+                            prev_row = df_test_prev[(df_test_prev['dataset'] == dname) & (df_test_prev['model_name'] == model_name)]
+                            if not prev_row.empty:
+                                prev_best_val = float(prev_row['best_val_accuracy'].iloc[0])
+                                prev_params = json.loads(prev_row['best_params_json'].iloc[0]) if 'best_params_json' in prev_row else None
+                                if best_val_acc > prev_best_val + 1e-5 or best_params != prev_params:
+                                    logger.info(f"⚡ Novo modelo de CV superior detectado para {model_name} (Acc: {best_val_acc:.2f}% vs {prev_best_val:.2f}%). Re-avaliando no Teste!")
+                                    needs_test = True
+                        except Exception:
+                            pass
+
+                    if not needs_test:
+                        logger.info(f"Teste já concluído para {model_name} ({dname}) e parâmetros ótimos inalterados. Pulando.")
+                        continue
+
+                    logger.info(f"Identificando melhores hiperparâmetros para {model_name} no dataset {dname}...")
                     logger.info(f"🏆 Melhor configuração selecionada por Acurácia na Validação: {best_params} (Val Acc: {best_val_acc:.2f}%)")
                     logger.info(f"Treinando modelo final em todo o conjunto de treino (225k) e avaliando no Teste...")
 
@@ -585,6 +608,10 @@ def parse_args():
         "--save_models", action="store_true", default=False,
         help="Salva os modelos ótimos finais treinados em disco (.joblib)"
     )
+    parser.add_argument(
+        "--force_test", action="store_true", default=False,
+        help="Força re-avaliação do melhor modelo no conjunto de teste mesmo se já concluído anteriormente"
+    )
     return parser.parse_args()
 
 
@@ -603,5 +630,6 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         log_dir=args.log_dir,
         models_dir=args.models_dir,
-        save_models=args.save_models
+        save_models=args.save_models,
+        force_test=args.force_test
     )

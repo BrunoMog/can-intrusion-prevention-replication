@@ -80,8 +80,41 @@ PARAM_GRID_SMOKE = {
     }
 }
 
+# Grade Refinada (Baseada na eliminação dos piores parâmetros da execução original)
+# - OCSVM: descarta gamma auto/0.1/0.5 e nu 0.05/0.1; foca em scale/1.0 e nu 0.005/0.01/0.02 (6 combinações)
+# - iForest: descarta contaminação auto/0.1 e max_samples 128/auto; foca em contaminação 0.005/0.01/0.02 (12 combinações)
+PARAM_GRID_REFINED = {
+    'OCSVM': {
+        'kernel': ['rbf'],
+        'nu': [0.005, 0.01, 0.02],
+        'gamma': ['scale', 1.0]
+    },
+    'iForest': {
+        'n_estimators': [100, 200],
+        'max_samples': [256, 512],
+        'contamination': [0.005, 0.01, 0.02]
+    }
+}
+
+# Grade Refinada Rápida (Ultraleve: 2 combinações OCSVM e 3 combinações iForest)
+# Ideal para rodadas de ajuste fino quase instantâneas
+PARAM_GRID_FAST_REFINED = {
+    'OCSVM': {
+        'kernel': ['rbf'],
+        'nu': [0.01],
+        'gamma': ['scale', 1.0]
+    },
+    'iForest': {
+        'n_estimators': [100],
+        'max_samples': [512],
+        'contamination': [0.005, 0.01, 0.02]
+    }
+}
+
 GRID_PRESETS = {
     'full': PARAM_GRID_FULL,
     'default': PARAM_GRID_DEFAULT,
-    'smoke': PARAM_GRID_SMOKE
+    'smoke': PARAM_GRID_SMOKE,
+    'refined': PARAM_GRID_REFINED,
+    'fast_refined': PARAM_GRID_FAST_REFINED
 }
