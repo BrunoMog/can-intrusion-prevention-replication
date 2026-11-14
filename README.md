@@ -1,51 +1,47 @@
-# Replicação: An Efficient Intrusion Prevention System for CAN Hindering Cyber-Attacks With a Low-Cost Platform
+# Replicação e Extensão: Sistema de Prevenção de Intrusão (IPS) Eficiente para Barramentos CAN Automotivos
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Institution: UFPE / CIn](https://img.shields.io/badge/Institution-UFPE%20%2F%20CIn-red.svg)](https://www.cin.ufpe.br/)
 
-Este repositório contém a replicação metodológica rigorosa e a expansão experimental do artigo científico:
+Este repositório contém a replicação experimental rigorosa, a avaliação de generalização em um segundo conjunto de dados independente e a **prova de conceito de uma arquitetura aprimorada em dois estágios com Dual-Cache** para o artigo científico:
 
 > **"An Efficient Intrusion Prevention System for CAN: Hindering Cyber-Attacks With a Low-Cost Platform"**  
-> *M. D. Hossain, H. Inoue, H. Ochiai, D. Fall and Y. Kadobayashi*  
-> **IEEE Access**, vol. 9, pp. 138356-138371, 2021.  
-> DOI: [10.1109/ACCESS.2021.3117464](https://doi.org/10.1109/ACCESS.2021.3117464)
+> *Paulo Freitas de Araujo-Filho, Antônio J. Pinheiro, Georges Kaddoum, Divanilson R. Campelo, and Fabio L. Soares*  
+> **IEEE Access**, vol. 9, pp. 166855–166869, 2021.  
+> DOI: [10.1109/ACCESS.2021.3136147](https://doi.org/10.1109/ACCESS.2021.3136147)
 
-Projeto desenvolvido no âmbito da disciplina **CIN0114** do **Centro de Informática (CIn)** da **Universidade Federal de Pernambuco (UFPE)**.
+Projeto desenvolvido para a disciplina **CIN0114 — Técnicas de Ataque e Detecção de Intrusão**, no **Centro de Informática (CIn)** da **Universidade Federal de Pernambuco (UFPE)**.
 
 ---
 
 ## Autores
 
-* **Bruno Antonio dos Santos Bezerra** ([@brunoantonio](https://github.com/))
-* **Filipe Maciel Leicht** ([@filipeleicht](https://github.com/))
+* **Bruno Antonio dos Santos Bezerra** (`basb@cin.ufpe.br`)
+* **Filipe Maciel Leicht** (`fml@cin.ufpe.br`)
 
 ---
 
-## 📌 Sumário
+## Sumário
 - [1. Visão Geral e Objetivos](#1-visão-geral-e-objetivos)
 - [2. Estrutura do Repositório](#2-estrutura-do-repositório)
 - [3. Instalação e Configuração](#3-instalação-e-configuração)
-- [4. Obtenção dos Datasets](#4-obtenção-dos-datasets)
+- [4. Datasets e Isolamento Metodológico](#4-datasets-e-isolamento-metodológico)
 - [5. Análise Exploratória de Dados (EDA)](#5-análise-exploratória-de-dados-eda)
-- [6. Pipeline de Treinamento e Otimização](#6-pipeline-de-treinamento-e-otimização)
-- [7. Execução no Cluster HPC (SLURM)](#7-execução-no-cluster-hpc-slurm)
-- [8. Análise Estatística e Pós-Processamento](#8-análise-estatística-e-pós-processamento)
-- [9. Metodologia e Isolamento de Dados](#9-metodologia-e-isolamento-de-dados)
-- [10. Contribuições e Melhorias em Relação ao Artigo](#10-contribuições-e-melhorias-em-relação-ao-artigo)
+- [6. Pipeline Base de Experimentos e Análise Estatística](#6-pipeline-base-de-experimentos-e-análise-estatística)
+- [7. Melhoria Proposta e Prova de Conceito (`poc_ips/`)](#7-melhoria-proposta-e-prova-de-conceito-poc_ips)
+- [8. Relatório Técnico em LaTeX](#8-relatório-técnico-em-latex)
 
 ---
 
 ## 1. Visão Geral e Objetivos
 
-O barramento **CAN (Controller Area Network)** é o padrão de fato para comunicação entre Unidades de Controle Eletrônico (ECUs) em veículos automotivos. No entanto, sua concepção original carece de mecanismos nativos de segurança cibernética (como autenticação, integridade de dados e criptografia), tornando redes veiculares vulneráveis a ataques de injeção de mensagens maliciosas como **Fuzzing**, **Drive Gear Spoofing** e **RPM Gauge Spoofing**.
+O barramento **CAN (Controller Area Network)** é o padrão dominante para comunicação entre Unidades de Controle Eletrônico (ECUs) automotivas, mas carece nativamente de autenticação, criptografia e controle de acesso.
 
-O artigo propõe um Sistema de Prevenção de Intrusão (IPS) baseado em aprendizado de máquina não supervisionado:
-1. **Modelos One-Class**: Treinados exclusivamente com tráfego normal para detectar desvios no padrão da carga útil (*payload*).
-   * **One-Class Support Vector Machine (OCSVM)** com kernel RBF.
-   * **Isolation Forest (iForest)**.
-2. **Abordagem Byte-a-Byte ($N = 1 \dots 8$)**: Avaliação de 16 modelos distintos por dataset (8 OCSVM e 8 iForest), variando a dimensão dos dados de entrada de 1 a 8 bytes do campo *DATA*. O objetivo é permitir que o IPS atue preventivamente nos primeiros bytes recebidos pelo microcontrolador, abortando o frame antes do final da transmissão.
-3. **Validação Rigorosa**: 10-Fold Cross-Validation, otimização por Grid Search e análise estatística confirmatória via **ANOVA One-Way** e teste post-hoc de **Tukey HSD**.
+Este projeto realiza três frentes principais:
+1. **Replicação Integral do Artigo Base**: Avaliação cruzada de 10 *folds* dos 16 modelos não supervisionados ($\text{OCSVM\_1F}\dots\text{8F}$ e $\text{iForest\_1F}\dots\text{8F}$) nos ataques *Fuzzing*, *Drive Gear Spoofing* e *RPM Gauge Spoofing* do *Car-Hacking Dataset*, com validação estatística via D'Agostino-Pearson, One-Way ANOVA e Tukey HSD.
+2. **Generalização em Segundo Dataset Independente**: Avaliação completa do protocolo (com particionamento proporcional em 10 *folds* sem vazamento de dados) no cenário físico *Prototype Speedometer Spoofing*.
+3. **Proposta de Melhoria e Prova de Conceito (`poc_ips/`)**: Arquitetura IPS assíncrona em **dois estágios** ($\text{iForest\_5F} \rightarrow \text{CAN\_ID} + 8\text{ bytes}$, exclusivamente com *Isolation Forest*) executada em **três *threads*** com memória compartilhada, sistema **Dual-Cache** com expiração anti-*replay* ($\text{TTL} = 100\text{ ms}$) e avaliação em simulador cronológico de confinamento de erros CAN 2.0A (`TEC += 8`, `Error Warning >= 96`, `Error Passive > 127`, `Bus-Off > 255`).
 
 ---
 
@@ -53,180 +49,157 @@ O artigo propõe um Sistema de Prevenção de Intrusão (IPS) baseado em aprendi
 
 ```text
 projeto_CIN0114/
-├── datasets/                                 # Datasets HCRL (ignorados pelo git)
-│   └── .gitkeep                              # Mantém a pasta versionada
-├── splits_cache/                             # Caches binários (.npz) de índices
+├── datasets/                                 # Datasets locais (ignorados pelo git)
 │   └── .gitkeep
-├── results/                                  # CSVs de validação cruzada e teste
+├── splits_cache/                             # Índices determinísticos (.npz) de folds/teste (ignorado)
 │   └── .gitkeep
-├── logs/                                     # Logs detalhados de execução e SLURM
+├── results/                                  # CSVs e gráficos dos experimentos base (ignorado)
 │   └── .gitkeep
-├── models/                                   # Modelos treinados (.joblib)
+├── models/                                   # Modelos base serializados (.joblib) (ignorado)
 │   └── .gitkeep
-├── An_Efficient_Intrusion_Prevention...pdf   # Cópia do artigo científico original
+├── logs/                                     # Logs de execução (ignorado)
+│   └── .gitkeep
+├── poc_ips/                                  # Prova de Conceito: IPS 2 Estágios + Dual-Cache (3 threads)
+│   ├── fast_iforest.c                        # Motor nativo em C para inferência por quadro único
+│   ├── fast_iforest.py                       # Wrapper ctypes + validação exata contra scikit-learn
+│   ├── models_stage2.py                      # Modelos Estágio 2 (9F Global e Híbridos por CAN ID)
+│   ├── train_stage2.py                       # Treinamento/seleção 10-Fold CV e avaliação em cascata
+│   ├── poc_simulator.py                      # Motor 3-threads Dual-Cache + simulador CAN 2.0A (TEC/Bus-Off)
+│   ├── models/                               # Modelos Estágio 1/2 persistidos (.joblib, ignorado)
+│   │   └── .gitkeep
+│   └── results/                              # CSVs e figuras da PoC (ignorado)
+│       └── .gitkeep
+├── relatorio/                                # Relatório técnico em formato IEEEtran (LaTeX + PDF)
+│   ├── relatorio_can_ips.tex                 # Código-fonte LaTeX principal
+│   ├── relatorio_can_ips.pdf                 # Relatório compilado final (13 páginas)
+│   ├── IEEEtran.cls                          # Classe IEEEtran Conference
+│   ├── fig_eda_signatures.png                # Fig. 1: Assinaturas de bytes e PCA (EDA)
+│   ├── fig_bytes_progression.png             # Fig. 2: Evolução da acurácia por N bytes (Fuzzing)
+│   ├── figure5_confusion_matrices.png        # Fig. 3: Matrizes de confusão (5F..8F)
+│   ├── fig_speedometer_analysis.png          # Fig. 4: Perfil e desempenho no Speedometer Spoofing
+│   ├── fig_stage2_cascade.png                # Fig. 5: Resgate de falsos positivos no Estágio 2
+│   └── fig_poc_comparison.png                # Fig. 6: Impacto sistêmico no simulador CAN 2.0A
+├── An_Efficient_Intrusion_Prevention_System_for_CAN_Hindering_Cyber-Attacks_With_a_Low-Cost_Platform.pdf
+├── config.py                                 # Presets de grades (smoke, default, refined, fast_refined, full)
+├── utils.py                                  # Parsing DLC=8, conversão Prototype->CSV e splits isolados
+├── run_experiments.py                        # Pipeline principal de CV 10-fold, Grid Search e Teste
+├── post_analysis.py                          # Testes D'Agostino-Pearson, ANOVA, Tukey HSD, SOTA e Fig. 5
+├── build_notebook.py                         # Gerador programático do notebook de EDA
 ├── EDA_CAN_Intrusion_Datasets.ipynb          # Notebook de EDA (zero test leakage)
-├── build_notebook.py                         # Script construtor/validador do Notebook
-├── config.py                                 # Grades de parâmetros e configurações
-├── notes.txt                                 # Notas de metodologia e requisitos
-├── post_analysis.py                          # Análise ANOVA, Tukey HSD, SOTA e Fig. 5
-├── requirements.txt                          # Dependências Python mapeadas
-├── run_experiments.py                        # Pipeline principal de experimentos
-├── submit_job_cluster.sh                     # Script SLURM (Job Array) para Cluster HPC
-├── utils.py                                  # Módulo central de I/O, métricas e splits
-└── README.md                                 # Documentação do projeto
+├── requirements.txt                          # Dependências Python do projeto
+├── .gitignore                                # Regras de arquivos ignorados
+└── README.md                                 # Documentação do repositório
 ```
 
 ---
 
 ## 3. Instalação e Configuração
 
-### 3.1. Requisitos do Sistema
-* Sistema Operacional: Linux (testado em Arch Linux e Debian/Ubuntu HPC Cluster)
-* Python: `>= 3.10`
+### Requisitos
+* **Sistema Operacional**: Linux (testado em ambiente local)
+* **Python**: `>= 3.10`
+* **Compilador C (`gcc`)**: necessário apenas para compilar sob demanda o módulo nativo `poc_ips/fast_iforest.c` (`_fast_iforest_c.so`) usado na simulação PoC
+* **LaTeX (`latexmk` + `pdflatex`)**: opcional, para recompilar o relatório em `relatorio/`
 
-### 3.2. Criação do Ambiente Virtual (venv)
-Por boas práticas, recomenda-se criar o ambiente virtual fora do diretório do projeto:
+### Criação do Ambiente Virtual
 
 ```bash
-# Criar ambiente virtual
-python3 -m venv ~/venvs/cin0114_venv
-
-# Ativar ambiente virtual
-source ~/venvs/cin0114_venv/bin/activate
-
-# Atualizar pip e instalar dependências
+python3 -m venv .venv
+source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 3.3. Registro do Kernel no Jupyter
-Para abrir o notebook com o interpretador correto:
+Para executar o notebook no Jupyter com o mesmo ambiente:
 
 ```bash
-python -m ipykernel install --user --name=cin0114_venv --display-name="Python (CIN0114 CAN IPS)"
+python -m ipykernel install --user --name=cin0114 --display-name="Python (CIN0114 CAN IPS)"
 ```
 
 ---
 
-## 4. Obtenção dos Datasets
+## 4. Datasets e Isolamento Metodológico
 
-Os dados utilizados são provenientes do **Car-Hacking Dataset** disponibilizado pelo *HCRL (Hacking and Countermeasure Research Lab)*:
-* [Link do HCRL Car-Hacking Dataset](https://ocslab.hksecurity.net/Datasets/car-hacking-dataset)
+Os experimentos empregam quatro conjuntos de dados com mensagens filtradas em `DLC = 8`:
+1. **Car-Hacking Dataset (HCRL)**: [Link oficial](https://ocslab.hksecurity.net/Datasets/car-hacking-dataset) — coloque em `datasets/` os arquivos `Fuzzy_dataset.csv`, `gear_dataset.csv` e `RPM_dataset.csv` (opcionalmente `DoS_dataset.csv`).
+2. **Prototype Speedometer Spoofing (2º dataset)**: arquivo bruto `datasets/data/Prototype/spoofing_speedometer.log` em formato `candump`, convertido para `datasets/Speedometer_dataset.csv` pela função `utils.convert_prototype_speedometer_log_to_csv()`.
 
-Os arquivos descompactados devem ser alocados dentro do diretório `datasets/`:
-* `datasets/Fuzzy_dataset.csv`
-* `datasets/gear_dataset.csv`
-* `datasets/RPM_dataset.csv`
-* `datasets/DoS_dataset.csv` *(opcional/referência)*
+### Particionamento (`seed = 42`, zero *test leakage*)
 
-O script `utils.py` verifica automaticamente a integridade e mapeamento dos datasets através de streaming otimizado por geradores, evitando estouro de memória RAM.
+| Dataset | Treino por *Fold* (9 *folds*) | Validação por *Fold* (50/50) | Teste Final (Blindado, DLC=8) |
+| :--- | :---: | :---: | :---: |
+| **Fuzzing** | 225.000 normais | 25.000 normais + 25.000 ataque | 3.476.024 (3.009.177 normais + 466.847 ataque) |
+| **Drive Gear** | 225.000 normais | 25.000 normais + 25.000 ataque | 4.127.977 (3.555.725 normais + 572.252 ataque) |
+| **RPM Gauge** | 225.000 normais | 25.000 normais + 25.000 ataque | 4.305.226 (3.675.329 normais + 629.897 ataque) |
+| **Speedometer** | 22.500 normais | 250 normais + 250 ataque | 118.046 (114.774 normais + 3.272 ataque) |
 
 ---
 
 ## 5. Análise Exploratória de Dados (EDA)
 
-O arquivo [`EDA_CAN_Intrusion_Datasets.ipynb`](file:///home/bruno/Documents/projeto_CIN0114/EDA_CAN_Intrusion_Datasets.ipynb) foi construído sob **estrito isolamento metodológico**:
-* **Zero Test Leakage**: A EDA é executada **exclusivamente** sobre a partição de Treinamento + Validação (amostras $0 \dots 299.999$), assegurando que as distribuições do conjunto de Teste nunca sejam observadas na fase exploratória.
-* **Filtragem de DLC**: Considera apenas mensagens CAN completas de 8 bytes de dados ($DLC = 8$), conforme premissa do artigo.
-* **Normalização por Domínio**: Mapeamento dos valores de bytes $[0, 255]$ para escala $[0.0, 1.0]$.
-* **Análise Temporal ($\Delta t$)**: Estudo dos intervalos de chegada entre mensagens consecutivas para identificar injeção de alta frequência.
-* **Mapas de Transição e Correlação**: Análise espacial dos bytes $D_0 \dots D_7$ para cada tipo de ataque versus tráfego normal.
+O notebook [EDA_CAN_Intrusion_Datasets.ipynb](EDA_CAN_Intrusion_Datasets.ipynb) (gerado via [build_notebook.py](build_notebook.py)) conduz toda a exploração **exclusivamente sobre as partições de Treinamento e Validação** ($0\dots 299.999$ no *Car-Hacking* e $27.500$ quadros no *Speedometer*), preservando os conjuntos de teste intactos:
+* Auditoria de contagens e distribuição por `CAN_ID`;
+* Perfis espaciais dos bytes normalizados $D_0 \dots D_7$ e identificação de fronteiras de separabilidade (ex.: $D_2 = \texttt{0x7E}$ no *Speedometer*);
+* Análise de separabilidade via PCA e dinâmica temporal ($\Delta t$).
 
 ---
 
-## 6. Pipeline de Treinamento e Otimização
+## 6. Pipeline Base de Experimentos e Análise Estatística
 
-O script [`run_experiments.py`](file:///home/bruno/Documents/projeto_CIN0114/run_experiments.py) gerencia o ciclo completo de treinamento, seleção de modelos e avaliação final.
-
-### 6.1. Características Principais
-* **Validação Cruzada 10-Fold**: 250.000 amostras normais divididas em 10 folds de 25.000. Em cada iteração, 9 folds (225.000 normais) são usados no treino e 1 fold normal (25.000) somado a 25.000 amostras maliciosas são usados para validação balanceada.
-* **Otimização por Grid Search**: Avaliação exaustiva dos hiperparâmetros configurados em [`config.py`](file:///home/bruno/Documents/projeto_CIN0114/config.py).
-* **Métrica Primária**: Acurácia (com cômputo adicional de Precisão, Recall, F1-Score e AUC-ROC).
-* **Salvamento Incremental e Resiliência (`--resume`)**: Permite pausar e retomar experimentos sem perda de progresso em caso de interrupção ou queda de nós no cluster.
-* **Cache Inteligente de Partições**: Índices de particionamento são serializados em `splits_cache/` em formato comprimido `.npz`.
-
-### 6.2. Exemplos de Execução
+### Execução dos Experimentos ([run_experiments.py](run_experiments.py))
 
 ```bash
-# 1. Teste Rápido de Fumaça (Smoke Test)
-python run_experiments.py --dataset "Fuzzing" --grid smoke
+# Smoke test rápido
+python run_experiments.py --datasets Fuzzing --grid smoke
 
-# 2. Execução Padrão com Salvamento de Modelos Serializados (.joblib)
-python run_experiments.py --dataset "Fuzzing" --grid default --save_models
+# Replicação completa (grade full nos 3 datasets do artigo)
+python run_experiments.py --datasets Fuzzing "Drive Gear" "RPM Gauge" --models OCSVM iForest --bytes 1 2 3 4 5 6 7 8 --grid full --folds 10
 
-# 3. Execução Completa para Todos os Datasets
-python run_experiments.py --dataset all --grid default
+# Avaliação separada no 2º dataset (Speedometer)
+python run_experiments.py --datasets Speedometer --models iForest --bytes 1 2 3 4 5 6 7 8 --grid full --folds 10
+python run_experiments.py --datasets Speedometer --models OCSVM --bytes 1 2 3 4 5 6 7 8 --grid full --folds 10
+```
 
-# 4. Retomada de Execução Interrompida
-python run_experiments.py --dataset "Drive Gear" --grid full --resume
+O pipeline utiliza leitura em *streaming*, fatoração exata de limiares na validação cruzada do *Isolation Forest* e retomada incremental via `--resume` (ativa por padrão).
+
+### Análise Estatística e Matrizes de Confusão ([post_analysis.py](post_analysis.py))
+
+```bash
+python post_analysis.py --fig5_dataset Fuzzing
+```
+
+Executa o teste de normalidade de D'Agostino-Pearson, One-Way ANOVA, teste *post-hoc* de Tukey HSD ($N$ mínimo equivalente ao modelo completo de 8 bytes), compara os resultados com o estado da arte (**GIDS** — Seo *et al.*, **DCNN** e **LSTM-IDS** — Song *et al.*, **MTH-IDS** — Yang *et al.*) e gera `results/figure5_confusion_matrices.png`.
+
+---
+
+## 7. Melhoria Proposta e Prova de Conceito (`poc_ips/`)
+
+Para atacar os falsos positivos do modelo $\text{iForest\_5F}$ e evitar o bloqueio em cascata de ECUs legítimas por *Bus-Off* (`TEC += 8` a cada *Error Frame* consecutivo até `TEC > 255`), o diretório [`poc_ips/`](poc_ips/) implementa uma arquitetura em dois estágios com três *threads* em memória compartilhada:
+
+* **Estágio 1 (`Worker_Stage1`)**: modelo $\text{iForest\_5F}$ pré-carregado atuando de forma síncrona no 5º byte ($D_0 \dots D_4$).
+* **Estágio 2 Assíncrono (`Worker_Stage2`)**: modelo exclusivo de *Isolation Forest* com `CAN_ID` normalizado + $8$ bytes ($D_0 \dots D_7$), avaliando variantes globais (`iForest_9F_Global`) e híbridas condicionadas por identificador (`iForest_Hybrid_Fallback`, `iForest_Hybrid_StrictUnknown`).
+* **Coordenador com Dual-Cache (`Coordinator`)**: chave compacta de 75 bits `(CAN_ID << 64) | payload_64`, **Cache 1** para rastreamento/deduplicação de alertas suspeitos ($k_{\text{trig}}$ configurável) e **Cache 2** com $\text{TTL} = 100\text{ ms}$ anti-*replay* para respostas em $\mathcal{O}(1)$ antes de nova penalização do `TEC`.
+
+### Comandos da PoC
+
+```bash
+# Etapa 1: Seleção 10-Fold CV e persistência dos modelos Estágio 1 e Estágio 2 (requer results/final_test_results.csv)
+python poc_ips/train_stage2.py --datasets Speedometer Fuzzing "Drive Gear" "RPM Gauge"
+
+# Etapas 2–4: Simulação PoC em 3 threads + confinamento de erros CAN 2.0A + ablações e figuras
+python poc_ips/poc_simulator.py --datasets Speedometer Fuzzing "Drive Gear" "RPM Gauge"
 ```
 
 ---
 
-## 7. Execução no Cluster HPC (SLURM)
+## 8. Relatório Técnico em LaTeX
 
-Para execuções pesadas no cluster do Centro de Informática (CIn/UFPE), o script [`submit_job_cluster.sh`](file:///home/bruno/Documents/projeto_CIN0114/submit_job_cluster.sh) está preparado com suporte a **SLURM Job Arrays**.
-
-### 7.1. Submissão Paralela Multi-Nó (Recomendado)
-Dispara 3 tarefas independentes em paralelo (uma para cada dataset: Fuzzing, Drive Gear, RPM Gauge):
+O relatório final está disponível em [`relatorio/relatorio_can_ips.pdf`](relatorio/relatorio_can_ips.pdf) e seu código-fonte em [`relatorio/relatorio_can_ips.tex`](relatorio/relatorio_can_ips.tex). Para recompilar:
 
 ```bash
-sbatch --array=0-2 submit_job_cluster.sh
+cd relatorio
+latexmk -pdf -interaction=nonstopmode relatorio_can_ips.tex
 ```
-
-### 7.2. Submissão para um Dataset Específico
-
-```bash
-sbatch submit_job_cluster.sh "Drive Gear"
-```
-
-Os logs de saída e erro são gerados automaticamente na pasta `logs/` com carimbos do SLURM Job ID.
-
----
-
-## 8. Análise Estatística e Pós-Processamento
-
-O módulo [`post_analysis.py`](file:///home/bruno/Documents/projeto_CIN0114/post_analysis.py) reproduz fielmente as análises inferenciais descritas na **Seção VI** do artigo:
-
-```bash
-python post_analysis.py
-```
-
-### O que o script realiza:
-1. **Teste de Normalidade de D'Agostino-Pearson (`scipy.stats.normaltest`)**: Valida o pressuposto de normalidade paramétrica das taxas de acerto nos 10 folds de validação cruzada ($p > 0.05$).
-2. **One-Way ANOVA (`scipy.stats.f_oneway`)**: Testa se há diferenças estatisticamente significantes entre as médias dos 16 modelos ($F\text{-statistic}$, $p\text{-value}$).
-3. **Teste Post-Hoc Tukey HSD (`scipy.stats.tukey_hsd`)**: Comparações par a par para identificar o **menor número de bytes ($N$)** cuja acurácia não difere estatisticamente do modelo completo de 8 bytes ($p > 0.05$).
-4. **Tabelas 7 a 11 do Artigo**: Confronta os resultados obtidos com os modelos do Estado da Arte:
-   * **GIDS** (Kang et al.)
-   * **DCNN** (Song et al.)
-   * **LSTM-IDS** (Taylor et al.)
-   * **MTH-IDS** (Yang et al.)
-   * **Artigo Original (Proposed IPS)**
-5. **Matrizes de Confusão (Figura 5)**: Plota e salva em formato gráfico as matrizes de confusão comparativas (Normal vs. Ataque) para os conjuntos de teste.
-
----
-
-## 9. Metodologia e Isolamento de Dados
-
-A replicação segue estritamente as especificações das **Tabelas 2, 3, 4 e 5** do artigo:
-
-| Dataset | Total de Mensagens | Treinamento (Normais) | Validação (Normais + Ataque) | Teste (Restante) |
-| :--- | :---: | :---: | :---: | :---: |
-| **Fuzzing** | 3.838.860 | 225.000 (9 folds) | 25.000 normais + 25.000 ataque | 3.563.860 |
-| **Drive Gear** | 4.443.142 | 225.000 (9 folds) | 25.000 normais + 25.000 ataque | 4.168.142 |
-| **RPM Gauge** | 4.621.702 | 225.000 (9 folds) | 25.000 normais + 25.000 ataque | 4.346.702 |
-
-* O particionamento é determinístico e reprodutível via semente pseudoaleatória controlada (`seed = 42`).
-* O conjunto de **Treinamento contém exclusivamente dados normais**, respeitando o paradigma One-Class.
-* Os conjuntos de **Validação e Teste contêm tráfego misto** (normal e malicioso).
-
----
-
-## 10. Contribuições e Melhorias em Relação ao Artigo
-
-1. **Métricas Adicionais de Avaliação**: O artigo original reporta apenas Acurácia, Precisão e Recall. Nossa implementação adiciona **F1-Score** e **AUC-ROC (Area Under the ROC Curve)**, proporcionando uma avaliação mais completa frente a desbalanceamentos severos no conjunto de teste.
-2. **Reprodutibilidade Aberta**: O trabalho original não disponibilizou o código-fonte nem a especificação detalhada da grade de hiperparâmetros. Este repositório fornece toda a infraestrutura com parametrizações completas e modularizadas.
-3. **Escalabilidade e Tolerância a Falhas**: Implementação de leitura em blocos, cacheamento binário de partições e suporte a *checkpointing* para execução em clusters de alto desempenho.
 
 ---
 

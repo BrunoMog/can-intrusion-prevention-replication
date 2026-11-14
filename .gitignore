@@ -27,6 +27,10 @@ results/*
 !results/.gitkeep
 models/*
 !models/.gitkeep
+poc_ips/results/*
+!poc_ips/results/.gitkeep
+poc_ips/models/*
+!poc_ips/models/.gitkeep
 logs/*
 !logs/.gitkeep
 *.joblib
@@ -94,3 +98,17 @@ Thumbs.db
 test
 *.out
 *.exe
+
+# Arquivos Temporários de Compilação LaTeX
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.lof
+*.lot
+*.nav
+*.snm
+*.synctex.gz
+*.toc
+*.vrb
