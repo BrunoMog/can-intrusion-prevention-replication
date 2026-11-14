@@ -61,12 +61,6 @@ SOTA_BENCHMARKS = {
     }
 }
 
-PAPER_TABLE_8_TIMES = {
-    'Fuzzing': 79.4645,
-    'Drive Gear': 78.0415,
-    'RPM Gauge': 77.9576
-}
-
 
 # ==============================================================================
 # CARREGAMENTO E PROCESSAMENTO DOS RESULTADOS EXPERIMENTAIS
@@ -97,6 +91,9 @@ def get_best_models_per_dataset(df_cv: pd.DataFrame) -> Dict[str, Dict[str, Dict
 
         for model_name in sub_d['model_name'].unique():
             sub_m = sub_d[sub_d['model_name'] == model_name]
+            sub_m_valid = sub_m[sub_m['mean_val_recall'] >= 10.0] if 'mean_val_recall' in sub_m.columns else sub_m
+            if not sub_m_valid.empty:
+                sub_m = sub_m_valid
             best_row = sub_m.sort_values('mean_val_accuracy', ascending=False).iloc[0]
 
             fold_accs = []
@@ -185,19 +182,33 @@ def run_statistical_analysis(best_models_dict: Dict[str, Dict[str, Dict[str, Any
                 ref_idx = model_names_list.index(ref_model)
 
                 print(f"   Comparação com o modelo completo de referência ({ref_model}):")
-                min_equivalent_n = 8
+                equiv_by_n = {8: True}
                 for idx, m_name in enumerate(model_names_list):
                     if m_name.startswith('iForest') and m_name != ref_model:
                         p_val = tukey_res.pvalue[ref_idx, idx]
-                        diff = abs(np.mean(model_fold_data[ref_model]) - np.mean(model_fold_data[m_name]))
-                        is_equiv = p_val > 0.05
+                        mean_m = float(np.mean(model_fold_data[m_name]))
+                        diff = abs(float(np.mean(model_fold_data[ref_model])) - mean_m)
                         n_b = int(m_name.split('_')[1].replace('F', ''))
-                        status_str = "Estatisticamente Equivalente (p > 0.05)" if is_equiv else "Significativamente Diferente (p <= 0.05)"
+                        is_valid_acc = mean_m >= 85.0 and n_b >= 2
+                        is_equiv = (p_val > 0.05) and is_valid_acc
+                        equiv_by_n[n_b] = is_equiv
+                        if mean_m < 85.0:
+                            status_str = f"Desconsiderado (< 85% acc: {mean_m:.2f}%)"
+                        elif p_val > 0.05:
+                            status_str = "Estatisticamente Equivalente (p > 0.05)"
+                        else:
+                            status_str = "Significativamente Diferente (p <= 0.05)"
                         print(f"     - {m_name} vs {ref_model}: p={p_val:.4f}, diff={diff:.3f}% -> {status_str}")
-                        if is_equiv and n_b < min_equivalent_n:
-                            min_equivalent_n = n_b
 
-                print(f"   🏆 Recomendação pelo Tukey HSD: iForest_{min_equivalent_n}F utiliza o menor número de bytes com desempenho equivalente a {ref_model}!")
+                # Determina o menor N tal que os modelos com N ou mais bytes sejam equivalentes (Seção VI-B)
+                min_equivalent_n = 8
+                for candidate_n in range(7, 1, -1):
+                    if equiv_by_n.get(candidate_n, False):
+                        min_equivalent_n = candidate_n
+                    else:
+                        break
+
+                print(f"   🏆 Recomendação pelo Tukey HSD: iForest_{min_equivalent_n}F utiliza o menor número de bytes (N >= {min_equivalent_n}) com desempenho equivalente a {ref_model}!")
 
 
 # ==============================================================================
@@ -228,25 +239,7 @@ def generate_paper_tables(df_test: pd.DataFrame):
         tab7 = sub_fuzz[[c for c in cols_show if c in sub_fuzz.columns]].rename(columns=cols_rename)
         print(tab7.to_string(index=False))
 
-    # 2. Tabela 8: Tempos de Inferência (µs)
-    print("\n[Tabela 8 - Tempos Médios de Inferência por Frame (µs)]")
-    sub_prop = df_test[df_test['model_name'] == 'iForest_5F']
-    if not sub_prop.empty:
-        time_rows = []
-        for _, row in sub_prop.iterrows():
-            dname = row['dataset']
-            us_per_frame = float(row['test_inference_us_per_frame'])
-            paper_time = PAPER_TABLE_8_TIMES.get(dname, np.nan)
-            meets_deadline = "SIM (< 86 µs)" if us_per_frame < 86.0 else "NÃO (> 86 µs)"
-            time_rows.append({
-                'Attack Type': dname,
-                'Tempo Obtido (µs)': f"{us_per_frame:.2f} µs",
-                'Artigo RPi4 (µs)': f"{paper_time:.2f} µs",
-                'Limite IPS (86 µs)': meets_deadline
-            })
-        print(pd.DataFrame(time_rows).to_string(index=False))
-
-    # 3. Tabelas 9, 10, 11: Comparativo com o Estado da Arte (GIDS, DCNN, LSTM, MTH-IDS)
+    # 2. Tabelas 9, 10, 11: Comparativo com o Estado da Arte (GIDS, DCNN, LSTM, MTH-IDS)
     for dname, tab_num in [('Fuzzing', 9), ('Drive Gear', 10), ('RPM Gauge', 11)]:
         print(f"\n[Tabela {tab_num} - Comparativo de Detecção: {dname}]")
         sub_d = df_test[(df_test['dataset'] == dname) & (df_test['model_name'] == 'iForest_5F')]

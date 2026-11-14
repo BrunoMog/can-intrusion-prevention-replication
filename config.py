@@ -12,8 +12,9 @@ definição de modelos, diretórios e métricas de otimização.
 
 import os
 
-# Datasets avaliados no artigo
+# Datasets avaliados no artigo + segundo dataset do projeto (Prototype Speedometer Spoofing)
 DATASETS = ['Fuzzing', 'Drive Gear', 'RPM Gauge']
+ALL_DATASETS = ['Fuzzing', 'Drive Gear', 'RPM Gauge', 'Speedometer']
 
 # Famílias de modelos e número de bytes de entrada (N = 1 a 8)
 MODEL_FAMILIES = ['OCSVM', 'iForest']
@@ -38,17 +39,17 @@ DEFAULT_CV_FOLDS = 10
 # GRADES DE HIPERPARÂMETROS (PARAM GRIDS)
 # ==============================================================================
 
-# Grade Completa (Ideal para execuções no Cluster HPC / SLURM)
+# Grade Completa (Inclui também as combinações campeãs do grid refinado do 1º experimento)
 PARAM_GRID_FULL = {
     'OCSVM': {
         'kernel': ['rbf'],
-        'nu': [0.01, 0.03, 0.05, 0.1],
+        'nu': [0.005, 0.01, 0.02, 0.03, 0.05, 0.1],
         'gamma': ['scale', 'auto', 0.1, 0.5, 1.0]
     },
     'iForest': {
         'n_estimators': [50, 100, 200],
-        'max_samples': [128, 256, 512, 'auto'],
-        'contamination': ['auto', 0.01, 0.05, 0.1]
+        'max_samples': [128, 256, 512, 16384, 'auto'],
+        'contamination': ['auto', 0.005, 0.01, 0.015, 0.02, 0.05, 0.1]
     }
 }
 
@@ -91,12 +92,12 @@ PARAM_GRID_REFINED = {
     },
     'iForest': {
         'n_estimators': [100, 200],
-        'max_samples': [256, 512],
-        'contamination': [0.005, 0.01, 0.02]
+        'max_samples': [256, 512, 16384],
+        'contamination': [0.005, 0.01, 0.015, 0.02]
     }
 }
 
-# Grade Refinada Rápida (Ultraleve: 2 combinações OCSVM e 3 combinações iForest)
+# Grade Refinada Rápida (Ultraleve: 2 combinações OCSVM e 4 combinações iForest com árvores profundas)
 # Ideal para rodadas de ajuste fino quase instantâneas
 PARAM_GRID_FAST_REFINED = {
     'OCSVM': {
@@ -106,8 +107,8 @@ PARAM_GRID_FAST_REFINED = {
     },
     'iForest': {
         'n_estimators': [100],
-        'max_samples': [512],
-        'contamination': [0.005, 0.01, 0.02]
+        'max_samples': [16384],
+        'contamination': [0.005, 0.01, 0.015, 0.02]
     }
 }
 

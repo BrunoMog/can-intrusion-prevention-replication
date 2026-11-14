@@ -33,17 +33,23 @@ import pandas as pd
 DATASET_PATHS = {
     'Fuzzing': 'datasets/Fuzzy_dataset.csv',
     'Drive Gear': 'datasets/gear_dataset.csv',
-    'RPM Gauge': 'datasets/RPM_dataset.csv'
+    'RPM Gauge': 'datasets/RPM_dataset.csv',
+    'Speedometer': 'datasets/Speedometer_dataset.csv'
+}
+
+RAW_LOG_PATHS = {
+    'Speedometer': 'datasets/data/Prototype/spoofing_speedometer.log'
 }
 
 BYTE_COLS = [f'D{i}' for i in range(8)]
 NORM_BYTE_COLS = [f'D{i}_norm' for i in range(8)]
 
-# Números de referência reportados na Tabela 2 do artigo
+# Números de referência reportados na Tabela 2 do artigo (e metadados do 2º dataset)
 PAPER_TABLE_2 = {
     'Fuzzing': {'total': 3838860, 'normal': 3347013, 'attack': 491847},
     'Drive Gear': {'total': 4443142, 'normal': 3845890, 'attack': 597252},
-    'RPM Gauge': {'total': 4621702, 'normal': 3966805, 'attack': 654897}
+    'RPM Gauge': {'total': 4621702, 'normal': 3966805, 'attack': 654897},
+    'Speedometer': {'total': 146109, 'normal': 140337, 'attack': 5772}
 }
 
 # Parâmetros de partição descritos na metodologia do artigo (Seção V-A)
@@ -52,12 +58,118 @@ N_VAL_NORMAL = 25_000            # 1 fold de 25.000 amostras normais
 N_VAL_ATTACK = 25_000            # 25.000 amostras de ataque selecionadas aleatoriamente
 N_TOTAL_NORMAL_SAMPLED = 250_000 # Total de amostras normais selecionadas para Treino + Validação
 
+# Configuração de particionamento por dataset (Opção B para o Speedometer: 10 folds de 2.500 normais
+# -> 22.500 no treino por fold, e validação balanceada de 250 normais + 250 ataques = 500 por fold)
+DATASET_SPLIT_CONFIG = {
+    'Fuzzing': {
+        'n_total_normal_sampled': 250_000,
+        'n_train_normal': 225_000,
+        'n_val_normal': 25_000,
+        'n_val_attack': 25_000,
+        'partition_val_attacks_across_folds': False,
+    },
+    'Drive Gear': {
+        'n_total_normal_sampled': 250_000,
+        'n_train_normal': 225_000,
+        'n_val_normal': 25_000,
+        'n_val_attack': 25_000,
+        'partition_val_attacks_across_folds': False,
+    },
+    'RPM Gauge': {
+        'n_total_normal_sampled': 250_000,
+        'n_train_normal': 225_000,
+        'n_val_normal': 25_000,
+        'n_val_attack': 25_000,
+        'partition_val_attacks_across_folds': False,
+    },
+    'Speedometer': {
+        'n_total_normal_sampled': 25_000,
+        'n_train_normal': 22_500,
+        'n_val_normal': 250,
+        'n_val_attack': 2_500,
+        'partition_val_attacks_across_folds': True,
+    }
+}
+
+
+def convert_prototype_speedometer_log_to_csv(
+    log_path: str = 'datasets/data/Prototype/spoofing_speedometer.log',
+    csv_out_path: str = 'datasets/Speedometer_dataset.csv'
+) -> str:
+    """
+    Converte o arquivo bruto no formato candump (`(timestamp) can0 ID#PAYLOAD`) do dataset
+    Prototype (spoofing_speedometer.log) para o formato CSV padronizado de 12 colunas:
+        Timestamp,CAN_ID,DLC,D0,D1,D2,D3,D4,D5,D6,D7,Flag
+    
+    Regras de rotulagem segundo `datasets/data/Prototype/README`:
+    - O ataque ocorre entre as linhas 53.966 e 76.682 (inclusive, base 1), onde a ECU
+      comprometida injeta o quadro `5A0#01807E0000000000` (220 km/h) -> Flag = 'T'.
+    - Todos os demais quadros pertencem ao tráfego legítimo -> Flag = 'R'.
+    """
+    if not os.path.exists(log_path):
+        raise FileNotFoundError(f"Log bruto não encontrado em: {log_path}")
+
+    os.makedirs(os.path.dirname(csv_out_path), exist_ok=True)
+    print(f"Convertendo log candump '{log_path}' para '{csv_out_path}'...")
+    t0 = time.time()
+
+    with open(log_path, 'r', encoding='utf-8', errors='replace') as fin, \
+         open(csv_out_path, 'w', encoding='utf-8', newline='') as fout:
+        writer = csv.writer(fout)
+        for line_num_1based, line in enumerate(fin, start=1):
+            line_s = line.strip()
+            if not line_s or '#' not in line_s:
+                continue
+            parts = line_s.split()
+            ts_str = parts[0].strip('()')
+            id_payload = parts[-1]
+            can_id_raw, payload_hex = id_payload.split('#', 1)
+            can_id = can_id_raw.lower().zfill(4)
+            dlc = len(payload_hex) // 2
+
+            # Extrai os bytes em hexadecimal minúsculo (preenche com '00' se DLC < 8 para manter 12 colunas)
+            bytes_hex = [payload_hex[2 * i:2 * (i + 1)].lower() for i in range(dlc)]
+            while len(bytes_hex) < 8:
+                bytes_hex.append('00')
+
+            is_attack = (
+                53966 <= line_num_1based <= 76682
+                and can_id_raw.upper() == '5A0'
+                and payload_hex.upper() == '01807E0000000000'
+            )
+            flag = 'T' if is_attack else 'R'
+            writer.writerow([ts_str, can_id, str(dlc), *bytes_hex[:8], flag])
+
+    print(f" -> Conversão concluída em {time.time() - t0:.2f}s: '{csv_out_path}'")
+    return csv_out_path
+
 
 def _resolve_filepath(dataset_key_or_path: str) -> str:
     """Resolve o caminho absoluto ou relativo a partir da chave do dataset ou caminho direto."""
     if dataset_key_or_path in DATASET_PATHS:
-        return DATASET_PATHS[dataset_key_or_path]
+        resolved = DATASET_PATHS[dataset_key_or_path]
+        if dataset_key_or_path == 'Speedometer' and not os.path.exists(resolved):
+            convert_prototype_speedometer_log_to_csv(RAW_LOG_PATHS['Speedometer'], resolved)
+        return resolved
+    if os.path.basename(dataset_key_or_path) == 'Speedometer_dataset.csv' and not os.path.exists(dataset_key_or_path):
+        convert_prototype_speedometer_log_to_csv(RAW_LOG_PATHS['Speedometer'], dataset_key_or_path)
     return dataset_key_or_path
+
+
+def _get_split_config(filepath_or_name: str) -> Dict[str, Union[int, bool]]:
+    """Retorna os parâmetros de particionamento correspondentes ao dataset."""
+    if filepath_or_name in DATASET_SPLIT_CONFIG:
+        return DATASET_SPLIT_CONFIG[filepath_or_name]
+    for k, p in DATASET_PATHS.items():
+        if os.path.basename(filepath_or_name) == os.path.basename(p):
+            return DATASET_SPLIT_CONFIG[k]
+    return {
+        'n_total_normal_sampled': N_TOTAL_NORMAL_SAMPLED,
+        'n_train_normal': N_TRAIN_NORMAL,
+        'n_val_normal': N_VAL_NORMAL,
+        'n_val_attack': N_VAL_ATTACK,
+        'partition_val_attacks_across_folds': False,
+    }
 
 
 # ==============================================================================
@@ -217,20 +329,29 @@ def get_split_indices(
     rng.shuffle(normal_line_indices)
     rng.shuffle(attack_line_indices)
 
-    # 250k normais para treino + validação (10 folds de 25k)
-    train_val_normal_idx = normal_line_indices[:N_TOTAL_NORMAL_SAMPLED]
-    test_normal_idx = normal_line_indices[N_TOTAL_NORMAL_SAMPLED:]
+    split_cfg = _get_split_config(filepath_or_name)
+    n_total_norm = int(split_cfg['n_total_normal_sampled'])
+    n_train_norm = int(split_cfg['n_train_normal'])
+    n_val_norm = int(split_cfg['n_val_normal'])
+    n_val_atk = int(split_cfg['n_val_attack'])
+    part_val_atk = bool(split_cfg['partition_val_attacks_across_folds'])
 
-    # 25k ataques para validação
-    val_attack_idx = attack_line_indices[:N_VAL_ATTACK]
-    test_attack_idx = attack_line_indices[N_VAL_ATTACK:]
+    # Amostras normais para treino + validação (10 folds)
+    train_val_normal_idx = normal_line_indices[:n_total_norm]
+    test_normal_idx = normal_line_indices[n_total_norm:]
 
-    # Padrão fold 0: primeiros 225k treino, últimos 25k validação
-    train_normal_idx = train_val_normal_idx[:N_TRAIN_NORMAL]
-    val_normal_idx = train_val_normal_idx[N_TRAIN_NORMAL:N_TOTAL_NORMAL_SAMPLED]
+    # Amostras de ataque reservadas para validação (os demais ataques ficam blindados no Teste Final)
+    val_attack_idx = attack_line_indices[:n_val_atk]
+    test_attack_idx = attack_line_indices[n_val_atk:]
 
-    # Validação combinada (25k normal + 25k ataque = 50.000)
-    val_indices = np.concatenate([val_normal_idx, val_attack_idx])
+    # Padrão fold 0: 9 folds normais de treino + subconjunto balanceado de validação
+    train_normal_idx = train_val_normal_idx[:n_train_norm]
+    val_normal_idx = train_val_normal_idx[n_train_norm:n_train_norm + n_val_norm]
+
+    val_atk_fold0 = val_attack_idx[:n_val_norm] if part_val_atk else val_attack_idx
+
+    # Validação combinada balanceada (50% normal + 50% ataque)
+    val_indices = np.concatenate([val_normal_idx, val_atk_fold0])
     rng.shuffle(val_indices)
 
     # Treino + Validação combinados (para EDA focada sem data leakage com teste)
@@ -400,13 +521,15 @@ def get_kfold_cv_indices(
     val_attack_idx: np.ndarray,
     fold_idx: int,
     n_splits: int = 10,
-    random_state: int = 42
+    random_state: int = 42,
+    partition_val_attacks_across_folds: bool = False
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Gera os índices de treino e validação para o fold `fold_idx` (0 a 9) da validação
     cruzada de 10 folds descrita no artigo:
-    - 9 folds de amostras normais (225k) para treino.
-    - 1 fold de amostras normais (25k) + 25k amostras de ataque para validação.
+    - Nos datasets originais: 9 folds normais (225k) no treino; 1 fold normal (25k) + 25k ataques na validação.
+    - No Speedometer (Opção B, partition_val_attacks_across_folds=True):
+      9 folds normais (22.500) no treino; 250 normais do 10º fold + 250 ataques do fold na validação (500 amostras).
     """
     if not (0 <= fold_idx < n_splits):
         raise ValueError(f"fold_idx deve estar entre 0 e {n_splits - 1}, recebido: {fold_idx}")
@@ -415,13 +538,22 @@ def get_kfold_cv_indices(
     val_start = fold_idx * fold_size
     val_end = val_start + fold_size
 
-    val_norm_fold = train_val_normal_idx[val_start:val_end]
     train_norm_fold = np.concatenate([
         train_val_normal_idx[:val_start],
         train_val_normal_idx[val_end:]
     ])
 
-    val_combined = np.concatenate([val_norm_fold, val_attack_idx])
+    if partition_val_attacks_across_folds:
+        atk_fold_size = len(val_attack_idx) // n_splits
+        atk_start = fold_idx * atk_fold_size
+        atk_end = atk_start + atk_fold_size
+        val_atk_fold = val_attack_idx[atk_start:atk_end]
+        val_norm_fold = train_val_normal_idx[val_start:val_start + atk_fold_size]
+    else:
+        val_norm_fold = train_val_normal_idx[val_start:val_end]
+        val_atk_fold = val_attack_idx
+
+    val_combined = np.concatenate([val_norm_fold, val_atk_fold])
     rng = np.random.default_rng(random_state + fold_idx)
     rng.shuffle(val_combined)
 

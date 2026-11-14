@@ -198,8 +198,9 @@ Abaixo, examinamos como os identificadores se distribuem entre o tráfego normal
     # -------------------------------------------------------------
     # Cell 8: Code - CAN ID Plotting
     # -------------------------------------------------------------
-    c8_code = r"""fig, axes = plt.subplots(1, 3, figsize=(17, 5))
-fig.suptitle('Análise de Identificadores CAN (CAN ID) no Conjunto de Treino + Validação', y=1.02, fontweight='bold')
+    c8_code = r"""fig, axes = plt.subplots(2, 2, figsize=(16, 9))
+axes = axes.flatten()
+fig.suptitle('Análise de Identificadores CAN (CAN ID) no Conjunto de Treino + Validação', y=1.01, fontweight='bold')
 
 for i, (name, ax) in enumerate(zip(utils.DATASET_PATHS.keys(), axes)):
     df_tv = dfs_train_val[name]
@@ -211,7 +212,8 @@ for i, (name, ax) in enumerate(zip(utils.DATASET_PATHS.keys(), axes)):
     top_ids = list(normal_ids.head(8).index)
     
     # Garante que o alvo de spoofing apareça no gráfico
-    target_id = '043f' if name == 'Drive Gear' else ('0316' if name == 'RPM Gauge' else None)
+    target_map = {'Drive Gear': '043f', 'RPM Gauge': '0316', 'Speedometer': '05a0'}
+    target_id = target_map.get(name, None)
     if target_id and target_id not in top_ids:
         top_ids.append(target_id)
         
@@ -226,9 +228,9 @@ for i, (name, ax) in enumerate(zip(utils.DATASET_PATHS.keys(), axes)):
     
     ax.set_xticks(x)
     ax.set_xticklabels([f"0x{cid}" for cid in top_ids], rotation=45, ha='right')
-    ax.set_title(f"{name}\n(IDs Únicos: Norm={len(normal_ids)}, Atk={len(attack_ids)})", fontweight='bold')
+    ax.set_title(f"{name}\n(IDs Únicos c/ DLC=8: Norm={len(normal_ids)}, Atk={len(attack_ids)})", fontweight='bold')
     ax.set_xlabel('CAN ID')
-    if i == 0:
+    if i % 2 == 0:
         ax.set_ylabel('Contagem de Mensagens (Treino+Val)')
     ax.legend()
     ax.grid(axis='y', linestyle='--', alpha=0.6)
@@ -239,9 +241,11 @@ plt.show()
 print("Alvos Específicos Identificados na Validação:")
 gear_atk_cnt = (dfs_train_val['Drive Gear']['CAN_ID'] == '043f') & (dfs_train_val['Drive Gear']['Flag'] == 'T')
 rpm_atk_cnt = (dfs_train_val['RPM Gauge']['CAN_ID'] == '0316') & (dfs_train_val['RPM Gauge']['Flag'] == 'T')
-print(f" -> Drive Gear: 100% dos ataques ({gear_atk_cnt.sum():,}) direcionados ao ID 0x043f.")
-print(f" -> RPM Gauge:  100% dos ataques ({rpm_atk_cnt.sum():,}) direcionados ao ID 0x0316.")
-print(f" -> Fuzzing:    Ataques distribuídos de forma estocástica por {(dfs_train_val['Fuzzing']['Flag'] == 'T').groupby(dfs_train_val['Fuzzing']['CAN_ID']).any().sum()} IDs distintos.")"""
+spd_atk_cnt = (dfs_train_val['Speedometer']['CAN_ID'] == '05a0') & (dfs_train_val['Speedometer']['Flag'] == 'T')
+print(f" -> Drive Gear:  100% dos ataques ({gear_atk_cnt.sum():,}) direcionados ao ID 0x043f.")
+print(f" -> RPM Gauge:   100% dos ataques ({rpm_atk_cnt.sum():,}) direcionados ao ID 0x0316.")
+print(f" -> Speedometer: 100% dos ataques ({spd_atk_cnt.sum():,}) direcionados ao ID 0x05a0 (Painel VW).")
+print(f" -> Fuzzing:     Ataques distribuídos de forma estocástica por {(dfs_train_val['Fuzzing']['Flag'] == 'T').groupby(dfs_train_val['Fuzzing']['CAN_ID']).any().sum()} IDs distintos.")"""
     cells.append(nbf.v4.new_code_cell(c8_code))
     
     # -------------------------------------------------------------
@@ -259,13 +263,15 @@ Abaixo, utilizamos a função utilitária `utils.compute_inter_arrival_times()` 
     # -------------------------------------------------------------
     # Cell 10: Code - Temporal Dynamics Code
     # -------------------------------------------------------------
-    c10_code = r"""fig, axes = plt.subplots(1, 3, figsize=(17, 4.5))
-fig.suptitle(r'Distribuição do Tempo Inter-Chegada ($\Delta t$) em Milissegundos [Treino + Validação]', y=1.02, fontweight='bold')
+    c10_code = r"""fig, axes = plt.subplots(2, 2, figsize=(16, 8))
+axes = axes.flatten()
+fig.suptitle(r'Distribuição do Tempo Inter-Chegada ($\Delta t$) em Milissegundos [Treino + Validação]', y=1.01, fontweight='bold')
 
 targets = [
     ('Fuzzing (Tráfego Geral)', 'Fuzzing', None),
     ('Drive Gear (Alvo 0x043F)', 'Drive Gear', '043f'),
-    ('RPM Gauge (Alvo 0x0316)', 'RPM Gauge', '0316')
+    ('RPM Gauge (Alvo 0x0316)', 'RPM Gauge', '0316'),
+    ('Speedometer (Alvo 0x05A0)', 'Speedometer', '05a0')
 ]
 
 for i, (title, dname, cid) in enumerate(targets):
@@ -280,7 +286,7 @@ for i, (title, dname, cid) in enumerate(targets):
             
     ax.set_title(title, fontweight='bold')
     ax.set_xlabel(r'$\log_{10}(\Delta t \text{ [ms]})$')
-    if i == 0:
+    if i % 2 == 0:
         ax.set_ylabel('Densidade')
     
     ticks = [-1, 0, 1, 2]
@@ -292,13 +298,14 @@ for i, (title, dname, cid) in enumerate(targets):
 plt.tight_layout()
 plt.show()
 
-# Mediana do Delta T para RPM
-df_rpm_t = utils.compute_inter_arrival_times(dfs_train_val['RPM Gauge'], target_id='0316')
-med_norm = df_rpm_t[df_rpm_t['Flag'] == 'R']['Delta_T_ms'].median()
-med_atk = df_rpm_t[df_rpm_t['Flag'] == 'T']['Delta_T_ms'].median()
-print(f"Período Inter-Chegada no Alvo de RPM (0x0316) em Treino+Validação:")
-print(f" -> Tráfego Normal: Mediana de {med_norm:.2f} ms (padrão periódico de 10 ms)")
-print(f" -> Injeção de Ataque: Mediana de {med_atk:.2f} ms (alta frequência de ~1.1 ms)")"""
+# Mediana do Delta T para RPM e Speedometer
+for dname, cid in [('RPM Gauge', '0316'), ('Speedometer', '05a0')]:
+    df_t = utils.compute_inter_arrival_times(dfs_train_val[dname], target_id=cid)
+    med_norm = df_t[df_t['Flag'] == 'R']['Delta_T_ms'].median()
+    med_atk = df_t[df_t['Flag'] == 'T']['Delta_T_ms'].median()
+    print(f"Período Inter-Chegada no Alvo de {dname} (0x{cid}) em Treino+Validação:")
+    print(f" -> Tráfego Normal (amostrado): Mediana de {med_norm:.2f} ms")
+    print(f" -> Injeção de Ataque (amostrado): Mediana de {med_atk:.2f} ms")"""
     cells.append(nbf.v4.new_code_cell(c10_code))
     
     # -------------------------------------------------------------
@@ -312,7 +319,7 @@ Em um barramento CAN padrão a $500\text{ kbps}$, cada bit consome $T_{\text{bit
 - Para que o IPS envie um quadro de erro CAN a tempo de descartar o frame invasor, a inferência na Raspberry Pi 4 deve ocorrer em menos de $86\text{ }\mu\text{s}$.
 - A inferência com $N=5$ bytes consome em média $\sim 78\text{-}79\text{ }\mu\text{s}$ no Isolation Forest (Tabela 8 do artigo), satisfazendo a restrição temporal com acurácia $>99\%$.
 
-Abaixo, inspecionamos os valores médios de cada byte ($D_0 \dots D_7$) em formato decimal ($0$ a $255$) e a versão normalizada dividida por $255.0$ ($[0.0, 1.0]$, conforme sugerido em `notes.txt`)."""
+Abaixo, inspecionamos os valores médios de cada byte ($D_0 \dots D_7$) em formato decimal ($0$ a $255$) e a versão normalizada dividida por $255.0$ ($[0.0, 1.0]$)."""
     cells.append(nbf.v4.new_markdown_cell(c11_md))
     
     # -------------------------------------------------------------
@@ -357,7 +364,7 @@ Observe que a anomalia é evidente já nos **primeiros bytes**, fundamentando po
     # -------------------------------------------------------------
     # Cell 14: Code - Boxplots of Bytes
     # -------------------------------------------------------------
-    c14_code = r"""fig, axes = plt.subplots(3, 1, figsize=(15, 11), sharex=True)
+    c14_code = r"""fig, axes = plt.subplots(4, 1, figsize=(15, 14), sharex=True)
 fig.suptitle(r'Distribuição dos Bytes $D_0$ a $D_7$ nos Dados de Treino e Validação', y=1.01, fontsize=14, fontweight='bold')
 
 for i, (name, df_tv) in enumerate(dfs_train_val.items()):
@@ -374,7 +381,7 @@ for i, (name, df_tv) in enumerate(dfs_train_val.items()):
     ax.set_ylabel('Valor do Byte (0-255)')
     ax.set_ylim(-5, 260)
     ax.grid(axis='y', linestyle='--', alpha=0.7)
-    if i < 2:
+    if i < 3:
         ax.set_xlabel('')
     else:
         ax.set_xlabel('Posição do Byte no Payload')
@@ -396,8 +403,9 @@ Para inspecionar a separabilidade geométrica dos dados no espaço normalizado (
     # -------------------------------------------------------------
     # Cell 16: Code - PCA Projection Code
     # -------------------------------------------------------------
-    c16_code = r"""fig, axes = plt.subplots(1, 3, figsize=(17, 5))
-fig.suptitle(r'Projeção 2D via PCA dos Payloads Normalizados ($D_0 \dots D_7 / 255.0$)', y=1.02, fontweight='bold')
+    c16_code = r"""fig, axes = plt.subplots(2, 2, figsize=(16, 9))
+axes = axes.flatten()
+fig.suptitle(r'Projeção 2D via PCA dos Payloads Normalizados ($D_0 \dots D_7 / 255.0$)', y=1.01, fontweight='bold')
 
 for i, (name, df_tv) in enumerate(dfs_train_val.items()):
     ax = axes[i]
@@ -419,7 +427,7 @@ for i, (name, df_tv) in enumerate(dfs_train_val.items()):
     
     ax.set_title(f"{name}\n(Var. Explicada: {var_exp:.1f}%)", fontweight='bold')
     ax.set_xlabel('Componente Principal 1')
-    if i == 0:
+    if i % 2 == 0:
         ax.set_ylabel('Componente Principal 2')
     ax.legend(loc='best')
     ax.grid(True, linestyle='--', alpha=0.5)
@@ -427,6 +435,43 @@ for i, (name, df_tv) in enumerate(dfs_train_val.items()):
 plt.tight_layout()
 plt.show()"""
     cells.append(nbf.v4.new_code_cell(c16_code))
+
+    # -------------------------------------------------------------
+    # Cell 16b: Deep-dive on Speedometer Spoofing (2nd Dataset)
+    # -------------------------------------------------------------
+    c16b_md = r"""### 7.1 Anatomia Específica do 2º Dataset: *Speedometer Spoofing* (Painel Volkswagen)
+No conjunto **Speedometer** (`Prototype/spoofing_speedometer.log`, analisado estritamente sobre as $27.500$ amostras de Treino+Validação):
+- O identificador alvo é o `0x05A0` (velocímetro do painel de instrumentos Volkswagen), que responde por $6{,}31\%$ ($1.578$ de $25.000$) dos quadros normais de 8 bytes no conjunto de treino/validação.
+- Ao comparar os quadros normais de `0x05A0` com os quadros de ataque (`01 80 7e 00 00 00 00 00`):
+  - **Bytes $D_0 = 1$ (`0x01`) e $D_1 = 128$ (`0x80`)**: São **100% idênticos e constantes** tanto nos quadros normais de `0x05A0` quanto nos quadros de ataque! Isso implica que com **$N=1$ ou $N=2$ bytes (`1F` e `2F`)**, o ataque colide exatamente com o tráfego normal de `0x05A0` ($6{,}31\%$ do barramento).
+  - **Byte $D_2$ (3º byte — Velocidade)**: No tráfego urbano normal (controlado pelo joystick), $D_2$ varia apenas no intervalo $[0, 28]$ (`0x00` a `0x1C`, média $4{,}81 \pm 7{,}92$). Já no ataque de *spoofing* (220 km/h), $D_2 = 126$ (`0x7E`), completamente disjunto do suporte normal!
+  - **Bytes $D_3 \dots D_7 = 0$ (`0x00`)**: São todos nulos tanto nos quadros normais de `0x05A0` quanto no ataque, de modo que a discriminação da anomalia nasce exatamente em **$N \ge 3$ bytes**."""
+    cells.append(nbf.v4.new_markdown_cell(c16b_md))
+
+    c16c_code = r"""df_spd = dfs_train_val['Speedometer']
+norm_all = df_spd[df_spd['Flag'] == 'R']
+norm_5a0 = norm_all[norm_all['CAN_ID'] == '05a0']
+atk_5a0 = df_spd[df_spd['Flag'] == 'T']
+
+print("=== Estatísticas dos Bytes no ID 0x05A0 (Treino + Validação) ===")
+summary_5a0 = pd.DataFrame({
+    'Normal (Todos IDs) - Média': norm_all[utils.BYTE_COLS].mean().round(2),
+    'Normal (ID 0x05A0) - Min': norm_5a0[utils.BYTE_COLS].min(),
+    'Normal (ID 0x05A0) - Média': norm_5a0[utils.BYTE_COLS].mean().round(2),
+    'Normal (ID 0x05A0) - Max': norm_5a0[utils.BYTE_COLS].max(),
+    'Ataque (ID 0x05A0) - Fixo': atk_5a0[utils.BYTE_COLS].iloc[0]
+})
+display(summary_5a0)
+
+# Taxa de colisão exata do prefixo de ataque [D0..D_{N-1}] no tráfego normal de Treino+Validação
+target_vals = atk_5a0[utils.BYTE_COLS].iloc[0].values
+print("\nTaxa de Colisão do Prefixo do Ataque (01 80 7E 00...) no Tráfego Normal (25.000 quadros):")
+for n_b in range(1, 9):
+    cols_n = utils.BYTE_COLS[:n_b]
+    matches = (norm_all[cols_n].values == target_vals[:n_b]).all(axis=1).sum()
+    pct = (matches / len(norm_all)) * 100.0
+    print(f" -> N={n_b} bytes ({cols_n[-1]} incluído): {matches:5d} / {len(norm_all):,} quadros normais idênticos ({pct:.2f}%)")"""
+    cells.append(nbf.v4.new_code_cell(c16c_code))
     
     # -------------------------------------------------------------
     # Cell 17: Markdown - 10-Fold CV Demonstration
@@ -445,15 +490,19 @@ A função `utils.get_kfold_cv_indices()` implementa esse gerador diretamente so
     # Cell 18: Code - 10-Fold CV Code
     # -------------------------------------------------------------
     c18_code = r"""# Demonstração do particionador K-Fold em utils.py
-fuzz_splits = splits_info['Fuzzing']
-train_val_normal = fuzz_splits['train_val_normal_idx']
-val_attack = fuzz_splits['val_attack_idx']
-
-print("Estrutura da Validação Cruzada de 10 Folds (Seção V-A do Artigo):")
-for fold in range(3):  # Exibindo os 3 primeiros folds como exemplo
-    tr_idx, val_idx = utils.get_kfold_cv_indices(train_val_normal, val_attack, fold_idx=fold, random_state=42)
-    print(f" -> Fold {fold + 1}/10: Treino = {len(tr_idx):,} amostras (100% normal) | Validação = {len(val_idx):,} amostras (25k normal + 25k ataque)")
-print("   ... (demais 7 folds seguem a mesma regra de rotação)")"""
+for dname in ['Fuzzing', 'Speedometer']:
+    sp = splits_info[dname]
+    cfg = utils._get_split_config(dname)
+    part_atk = bool(cfg['partition_val_attacks_across_folds'])
+    print(f"\nEstrutura da Validação Cruzada de 10 Folds — Dataset: {dname}:")
+    for fold in range(3):
+        tr_idx, val_idx = utils.get_kfold_cv_indices(
+            sp['train_val_normal_idx'], sp['val_attack_idx'],
+            fold_idx=fold, random_state=42,
+            partition_val_attacks_across_folds=part_atk
+        )
+        print(f" -> Fold {fold + 1}/10: Treino = {len(tr_idx):,} amostras (100% normal) | Validação = {len(val_idx):,} amostras (50% normal + 50% ataque)")
+    print("   ... (demais 7 folds seguem a mesma regra de rotação)")"""
     cells.append(nbf.v4.new_code_cell(c18_code))
     
     # -------------------------------------------------------------

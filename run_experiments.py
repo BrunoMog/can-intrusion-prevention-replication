@@ -239,48 +239,114 @@ def run_kfold_cv_for_params(
     val_attack_X: np.ndarray,
     n_splits: int = 10,
     random_state: int = 42,
-    n_jobs: int = -1
+    n_jobs: int = -1,
+    iforest_fold_cache: Optional[Dict[Tuple[Any, Any], List[Dict[str, Any]]]] = None,
+    partition_val_attacks_across_folds: bool = False
 ) -> Dict[str, float]:
     """
     Executa a validação cruzada de 10 folds para uma dada combinação de hiperparâmetros.
     Em cada fold:
-    - Treino: 9 folds (225k) de amostras normais.
-    - Validação: 1 fold (25k) de normais + 25k de ataques (50k amostras balanceadas).
+    - Datasets originais: Treino = 9 folds (225k) normais; Validação = 1 fold (25k) normal + 25k ataques (50k balanceadas).
+    - Speedometer (Opção B, partition_val_attacks_across_folds=True):
+      Treino = 9 folds (22.500) normais; Validação = 250 normais do 10º fold + 250 ataques do fold (500 balanceadas).
     """
     fold_metrics_list = []
     total_fit_time = 0.0
     total_eval_time = 0.0
 
     fold_size = len(X_norm_pool) // n_splits
-    y_val_attack = np.ones(len(val_attack_X), dtype=int)
+    atk_fold_size = (len(val_attack_X) // n_splits) if partition_val_attacks_across_folds else len(val_attack_X)
 
-    for fold_idx in range(n_splits):
-        val_start = fold_idx * fold_size
-        val_end = val_start + fold_size
+    # Otimização matemática exata para IsolationForest: as árvores dependem apenas de
+    # (n_estimators, max_samples), enquanto 'contamination' apenas define o percentil (offset_)
+    if model_family == 'iForest' and iforest_fold_cache is not None:
+        tree_key = (params.get('n_estimators', 100), params.get('max_samples', 'auto'))
+        if tree_key not in iforest_fold_cache:
+            cached_folds = []
+            base_params = {**params, 'contamination': 'auto'}
+            for fold_idx in range(n_splits):
+                val_start = fold_idx * fold_size
+                val_end = val_start + fold_size
+                X_train_norm = np.concatenate([X_norm_pool[:val_start], X_norm_pool[val_end:]], axis=0)
+                if partition_val_attacks_across_folds:
+                    X_val_norm = X_norm_pool[val_start:val_start + atk_fold_size]
+                    X_val_atk = val_attack_X[fold_idx * atk_fold_size:(fold_idx + 1) * atk_fold_size]
+                else:
+                    X_val_norm = X_norm_pool[val_start:val_end]
+                    X_val_atk = val_attack_X
+                y_val_attack_fold = np.ones(len(X_val_atk), dtype=int)
+                X_val_combined = np.concatenate([X_val_norm, X_val_atk], axis=0)
+                y_val_combined = np.concatenate([np.zeros(len(X_val_norm), dtype=int), y_val_attack_fold], axis=0)
 
-        X_val_norm = X_norm_pool[val_start:val_end]
-        X_train_norm = np.concatenate([
-            X_norm_pool[:val_start],
-            X_norm_pool[val_end:]
-        ], axis=0)
+                rng = np.random.default_rng(random_state + fold_idx)
+                val_perm = rng.permutation(len(X_val_combined))
+                X_val_combined = X_val_combined[val_perm]
+                y_val_combined = y_val_combined[val_perm]
 
-        # Monta conjunto de validação balanceado (25k normais + 25k ataques)
-        X_val_combined = np.concatenate([X_val_norm, val_attack_X], axis=0)
-        y_val_combined = np.concatenate([np.zeros(len(X_val_norm), dtype=int), y_val_attack], axis=0)
+                t0_fit = time.time()
+                model = instantiate_model(model_family, base_params, random_state=random_state + fold_idx, n_jobs=n_jobs)
+                model.fit(X_train_norm)
+                s_train = model.score_samples(X_train_norm)
+                fit_t = time.time() - t0_fit
 
-        # Embaralha validação
-        rng = np.random.default_rng(random_state + fold_idx)
-        val_perm = rng.permutation(len(X_val_combined))
-        X_val_combined = X_val_combined[val_perm]
-        y_val_combined = y_val_combined[val_perm]
+                t0_eval = time.time()
+                s_val = model.score_samples(X_val_combined)
+                eval_t = time.time() - t0_eval
 
-        # Instancia e avalia
-        model = instantiate_model(model_family, params, random_state=random_state + fold_idx, n_jobs=n_jobs)
-        metrics, fit_t, eval_t = fit_predict_evaluate(model, X_train_norm, X_val_combined, y_val_combined)
+                cached_folds.append({
+                    's_train': s_train,
+                    's_val': s_val,
+                    'y_val': y_val_combined,
+                    'fit_t': fit_t,
+                    'eval_t': eval_t
+                })
+            iforest_fold_cache[tree_key] = cached_folds
 
-        fold_metrics_list.append(metrics)
-        total_fit_time += fit_t
-        total_eval_time += eval_t
+        cont = params.get('contamination', 'auto')
+        for fdata in iforest_fold_cache[tree_key]:
+            offset = -0.5 if cont == 'auto' else float(np.percentile(fdata['s_train'], 100.0 * float(cont)))
+            dec = fdata['s_val'] - offset
+            y_pred = (dec < 0).astype(int)
+            scores = -dec
+            metrics = utils.evaluate_detection_metrics(fdata['y_val'], y_pred, scores=scores)
+            fold_metrics_list.append(metrics)
+            total_fit_time += fdata['fit_t']
+            total_eval_time += fdata['eval_t']
+    else:
+        for fold_idx in range(n_splits):
+            val_start = fold_idx * fold_size
+            val_end = val_start + fold_size
+
+            X_train_norm = np.concatenate([
+                X_norm_pool[:val_start],
+                X_norm_pool[val_end:]
+            ], axis=0)
+
+            if partition_val_attacks_across_folds:
+                X_val_norm = X_norm_pool[val_start:val_start + atk_fold_size]
+                X_val_atk = val_attack_X[fold_idx * atk_fold_size:(fold_idx + 1) * atk_fold_size]
+            else:
+                X_val_norm = X_norm_pool[val_start:val_end]
+                X_val_atk = val_attack_X
+            y_val_attack_fold = np.ones(len(X_val_atk), dtype=int)
+
+            # Monta conjunto de validação balanceado
+            X_val_combined = np.concatenate([X_val_norm, X_val_atk], axis=0)
+            y_val_combined = np.concatenate([np.zeros(len(X_val_norm), dtype=int), y_val_attack_fold], axis=0)
+
+            # Embaralha validação
+            rng = np.random.default_rng(random_state + fold_idx)
+            val_perm = rng.permutation(len(X_val_combined))
+            X_val_combined = X_val_combined[val_perm]
+            y_val_combined = y_val_combined[val_perm]
+
+            # Instancia e avalia
+            model = instantiate_model(model_family, params, random_state=random_state + fold_idx, n_jobs=n_jobs)
+            metrics, fit_t, eval_t = fit_predict_evaluate(model, X_train_norm, X_val_combined, y_val_combined)
+
+            fold_metrics_list.append(metrics)
+            total_fit_time += fit_t
+            total_eval_time += eval_t
 
     # Calcula médias e desvios padrão agregados sobre os 10 folds
     summary = {
@@ -355,7 +421,9 @@ def run_experiment_pipeline(
 
     for dname in datasets:
         logger.info(f"\n{'#'*80}\nPROCESSANDO DATASET: {dname}\n{'#'*80}")
-        filepath = utils.DATASET_PATHS[dname]
+        filepath = utils._resolve_filepath(dname)
+        split_cfg = utils._get_split_config(dname)
+        part_val_atk = bool(split_cfg['partition_val_attacks_across_folds'])
 
         # Obtém índices particionados do cache (.npz)
         splits = utils.get_split_indices(filepath, random_state=random_state)
@@ -398,6 +466,7 @@ def run_experiment_pipeline(
                 best_params = None
                 best_val_score = -float('inf')
                 best_cv_summary = None
+                iforest_fold_cache: Dict[Tuple[Any, Any], List[Dict[str, Any]]] = {}
 
                 for p_idx, params in enumerate(combinations, start=1):
                     params_json = json.dumps(params, sort_keys=True)
@@ -415,7 +484,9 @@ def run_experiment_pipeline(
                         val_attack_X=val_attack_X,
                         n_splits=cv_folds,
                         random_state=random_state,
-                        n_jobs=n_jobs
+                        n_jobs=n_jobs,
+                        iforest_fold_cache=iforest_fold_cache,
+                        partition_val_attacks_across_folds=part_val_atk
                     )
                     cv_time = time.time() - t_cv
 
@@ -448,6 +519,18 @@ def run_experiment_pipeline(
                         logger.warning(f"Nenhum resultado de CV encontrado para {dname} - {model_name}.")
                         continue
 
+                    # Considera os parâmetros da grade ativa se tiverem recall válido (>10%);
+                    # caso contrário, faz fallback para os modelos com recall válido (>10%) já avaliados.
+                    current_param_keys = set(json.dumps(c, sort_keys=True) for c in combinations)
+                    sub_cv_filtered = sub_cv[sub_cv['params_json'].apply(lambda x: json.dumps(json.loads(x), sort_keys=True) in current_param_keys)]
+                    sub_cv_valid = sub_cv_filtered[sub_cv_filtered['mean_val_recall'] >= 10.0]
+                    if not sub_cv_valid.empty:
+                        sub_cv = sub_cv_valid
+                    else:
+                        sub_all_valid = sub_cv[sub_cv['mean_val_recall'] >= 10.0]
+                        if not sub_all_valid.empty:
+                            sub_cv = sub_all_valid
+
                     best_row = sub_cv.sort_values(['mean_val_accuracy', 'mean_val_f1'], ascending=[False, False]).iloc[0]
                     best_params = json.loads(best_row['params_json'])
                     best_val_acc = float(best_row['mean_val_accuracy'])
@@ -461,8 +544,9 @@ def run_experiment_pipeline(
                             prev_row = df_test_prev[(df_test_prev['dataset'] == dname) & (df_test_prev['model_name'] == model_name)]
                             if not prev_row.empty:
                                 prev_best_val = float(prev_row['best_val_accuracy'].iloc[0])
+                                prev_test_rec = float(prev_row['test_recall'].iloc[0]) if 'test_recall' in prev_row else 100.0
                                 prev_params = json.loads(prev_row['best_params_json'].iloc[0]) if 'best_params_json' in prev_row else None
-                                if best_val_acc > prev_best_val + 1e-5 or best_params != prev_params:
+                                if best_val_acc > prev_best_val + 1e-5 or prev_test_rec < 1.0 or (best_params != prev_params and best_val_acc >= 60.0):
                                     logger.info(f"⚡ Novo modelo de CV superior detectado para {model_name} (Acc: {best_val_acc:.2f}% vs {prev_best_val:.2f}%). Re-avaliando no Teste!")
                                     needs_test = True
                         except Exception:
@@ -558,7 +642,7 @@ def parse_args():
     )
     parser.add_argument(
         "--datasets", nargs="+", default=config.DATASETS,
-        choices=config.DATASETS, help="Datasets a processar (default: todos os 3)"
+        choices=config.ALL_DATASETS, help="Datasets a processar (default: todos os 3 do artigo; suporta também 'Speedometer')"
     )
     parser.add_argument(
         "--models", nargs="+", default=config.MODEL_FAMILIES,
