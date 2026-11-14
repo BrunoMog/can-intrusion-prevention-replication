@@ -65,7 +65,7 @@ projeto_CIN0114/
 │   ├── fast_iforest.c                        # Motor nativo em C para inferência por quadro único
 │   ├── fast_iforest.py                       # Wrapper ctypes (sem APIs privadas) + Liu et al. c(n)
 │   ├── test_equivalence.py                   # Testes unitários sintéticos e de integração C vs sklearn
-│   ├── test_simulator.py                     # Testes determinísticos de fila heapq, Error Passive, TOST e SHA-256
+│   ├── test_simulator.py                     # Testes determinísticos (heapq, barreira Cache 2, Cache 1 TTL, worker finally, Error Passive, TOST, SHA-256)
 │   ├── models_stage2.py                      # Modelos Estágio 2 (9F Global e Híbridos por CAN ID)
 │   ├── train_stage2.py                       # Treinamento/seleção 10-Fold CV e avaliação em cascata
 │   ├── poc_simulator.py                      # Motor 3-threads Dual-Cache + fila heapq CAN 2.0A por CAN ID + --sensitivity
@@ -196,7 +196,7 @@ Para atacar os falsos positivos do modelo `iForest_5F` e evitar o bloqueio em ca
 
 * **Estágio 1 (`Worker_Stage1`)**: modelo `iForest_5F` pré-carregado atuando de forma síncrona no 5º byte (`D0..D4`).
 * **Estágio 2 Assíncrono (`Worker_Stage2`)**: modelo exclusivo de *Isolation Forest* com `CAN_ID` normalizado + `8` bytes (`D0..D7`), avaliando variantes globais (`iForest_9F_Global`) e híbridas condicionadas por identificador (`iForest_Hybrid_Fallback`, `iForest_Hybrid_StrictUnknown`).
-* **Coordenador com Dual-Cache (`Coordinator`)**: chave compacta de 75 bits `(CAN_ID << 64) | payload_64`, **Cache 1** para rastreamento/deduplicação de alertas suspeitos (`k_trig` configurável) e **Cache 2** com expiração temporal limitada (`TTL = 100 ms`, invalidação *lazy* + varredura periódica a cada 50 mil quadros) para respostas em `O(1)` antes de nova penalização do `TEC` (não provê proteção *anti-replay*).
+* **Coordenador com Dual-Cache (`Coordinator`)**: chave compacta de 75 bits `(CAN_ID << 64) | payload_64`, **Cache 1** para rastreamento/deduplicação de alertas suspeitos (`k_trig` configurável, com expiração independente por `TTL = 100 ms` para entradas `OBSERVING`) e **Cache 2** com expiração temporal limitada (`TTL = 100 ms`, invalidação *lazy* + varredura periódica a cada 50 mil eventos) para respostas em `O(1)` antes de nova penalização do `TEC` (não provê proteção *anti-replay*).
 
 ### Comandos da PoC
 
