@@ -17,11 +17,21 @@ CAN 2.0A Error-Confinement model over logged traffic:
     `Error Passive` states (Bosch CAN 2.0A Section 7.2). Note: this bus-error
     confinement model does NOT apply to a purely software gateway dropping frames
     silently post-reception.
-  - Chronological Global Event Scheduler (`heapq`): original trace arrivals and
-    scheduled retransmissions advance monotonically in global `sim_t` order so
-    Stage-2 async completion barriers and TEC/cache states never reflect future events.
+  - Chronological Global Event Scheduler & Coordinated Temporal Barriers:
+    original trace arrivals and scheduled retransmissions (`retransmit_heap`)
+    advance monotonically in global `sim_t` order, while `_in_flight_stage2`
+    coordinates asynchronous Stage-2 availability barriers (`sim_t >= available_ts`)
+    and `bus_off_until` gates recovery checks per `CAN_ID` upon frame arrivals
+    or retransmission attempts. Stage-2 uses a fixed simulated latency parameter
+    (`stage2_sim_latency_sec`); coordinator `evt.wait()` ensures worker completion
+    in wall-clock time without injecting host CPU excess back into `sim_t`.
     Remaining simplification: full CAN arbitration / priority contention delays across
     distinct IDs on the wire are not rescheduled.
+  - Dual-Cache Bounded Memory (TTL): when `cache2_ttl_sec` is enabled, both
+    validated Cache-2 verdicts (`sim_t > expires_ts`) and unpromoted `OBSERVING`
+    entries in Cache 1 (`sim_t - last_ts > ttl_sec`) expire lazily on lookup
+    and periodically in `sweep_expired(sim_t)`, preventing unbounded Cache-1
+    growth when `cache1_trigger_count > 1`.
   - Error Passive (`TEC > 127`) & Suspend Transmission: while `in_passive` is True,
     modeled retransmissions add a simplified parameterized 8-bit `Suspend Transmission`
     delay approximation (`passive_suspend_sec = 16 us` at 500 kbps) on top of
@@ -280,9 +290,16 @@ class ThreeThreadIPSEngine:
         self._cache_lock = threading.Lock()
         self.cache1_suspects: Dict[int, Cache1Entry] = {}
         self.cache2_validated: Dict[int, Cache2Entry] = {}
-        # Heap entries: (ready_ts, seq, key, done_evt, result_holder)
+        # Heap entries: (ready_ts, seq, key, done_evt, result_holder, error_holder)
         self._in_flight_stage2: List[
-            Tuple[float, int, int, threading.Event, List[Optional[Cache2Entry]]]
+            Tuple[
+                float,
+                int,
+                int,
+                threading.Event,
+                List[Optional[Cache2Entry]],
+                List[Optional[BaseException]],
+            ]
         ] = []
         self._s2_seq = 0
 
@@ -293,6 +310,7 @@ class ThreeThreadIPSEngine:
         self.stage2_calls = 0
         self.stage2_compute_sec = 0.0
         self.cache1_dedup_hits = 0
+        self.cache1_expirations = 0
         self.cache2_hits = 0
         self.cache2_hit_allow = 0
         self.cache2_hit_block = 0
@@ -324,11 +342,14 @@ class ThreeThreadIPSEngine:
             frame_idx = q_in.get()
             if frame_idx is _STOP_SENTINEL:
                 break
-            t0 = perf()
-            pred1 = predict_s1(x5_f32[frame_idx])
-            local_sec += perf() - t0
-            local_calls += 1
-            q_out.put(pred1)
+            try:
+                t0 = perf()
+                pred1 = predict_s1(x5_f32[frame_idx])
+                local_sec += perf() - t0
+                local_calls += 1
+                q_out.put(pred1)
+            except Exception as exc:
+                q_out.put(exc)
 
         self.stage1_calls = local_calls
         self.stage1_compute_sec = local_sec
@@ -338,7 +359,8 @@ class ThreeThreadIPSEngine:
 
         Computes the verdict on its own thread but writes only to the per-job
         staging holder; the Coordinator exclusively publishes entries to Cache 2
-        once simulated time reaches `available_ts`.
+        once simulated time reaches `available_ts`. Always signals `done_evt` in a
+        `finally` block and captures exceptions for propagation to the Coordinator.
         """
         assert self.fast_s2 is not None
         cids_int = self.stream.can_ids_int
@@ -353,20 +375,24 @@ class ThreeThreadIPSEngine:
             item = q_in.get()
             if item is _STOP_SENTINEL:
                 break
-            frame_idx, available_ts, ttl_sec, done_evt, result_holder = item
-            t0 = perf()
-            pred2, score2 = predict_s2(int(cids_int[frame_idx]), x8_f32[frame_idx])
-            local_sec += perf() - t0
-            local_calls += 1
+            frame_idx, available_ts, ttl_sec, done_evt, result_holder, error_holder = item
+            try:
+                t0 = perf()
+                pred2, score2 = predict_s2(int(cids_int[frame_idx]), x8_f32[frame_idx])
+                local_sec += perf() - t0
+                local_calls += 1
 
-            expires_ts = available_ts + ttl_sec if ttl_sec is not None else math.inf
-            result_holder[0] = Cache2Entry(
-                verdict=pred2,
-                available_ts=available_ts,
-                expires_ts=expires_ts,
-                score2=score2,
-            )
-            done_evt.set()
+                expires_ts = available_ts + ttl_sec if ttl_sec is not None else math.inf
+                result_holder[0] = Cache2Entry(
+                    verdict=pred2,
+                    available_ts=available_ts,
+                    expires_ts=expires_ts,
+                    score2=score2,
+                )
+            except Exception as exc:
+                error_holder[0] = exc
+            finally:
+                done_evt.set()
 
         self.stage2_calls = local_calls
         self.stage2_compute_sec = local_sec
@@ -377,8 +403,12 @@ class ThreeThreadIPSEngine:
         c1 = self.cache1_suspects
         c2 = self.cache2_validated
         while inflight and inflight[0][0] <= sim_t:
-            ready_ts, _, key, evt, result_holder = heapq.heappop(inflight)
+            ready_ts, _, key, evt, result_holder, error_holder = heapq.heappop(inflight)
             evt.wait()
+            if error_holder[0] is not None:
+                raise RuntimeError(
+                    f"Stage-2 worker failure for key={key} at sim_t={sim_t}"
+                ) from error_holder[0]
             entry2 = result_holder[0]
             if entry2 is not None:
                 c2[key] = entry2
@@ -392,24 +422,34 @@ class ThreeThreadIPSEngine:
         """Wait for remaining asynchronous Stage-2 tasks cleanly before shutdown."""
         inflight = self._in_flight_stage2
         while inflight:
-            _, _, _, evt, _ = heapq.heappop(inflight)
+            _, _, _, evt, _, _ = heapq.heappop(inflight)
             evt.wait()
 
     def sweep_expired(self, sim_t: float) -> None:
-        """Periodically prune expired TTL entries to mirror embedded RAM footprint."""
+        """Periodically prune expired Cache-1 OBSERVING and Cache-2 TTL entries."""
         if not self.cfg.use_caches:
             return
         if self._in_flight_stage2:
             self._drain_completed_stage2(sim_t)
         self.peak_cache1_entries = max(self.peak_cache1_entries, len(self.cache1_suspects))
         self.peak_cache2_entries = max(self.peak_cache2_entries, len(self.cache2_validated))
-        if self.cfg.cache2_ttl_sec is None:
+        ttl_sec = self.cfg.cache2_ttl_sec
+        if ttl_sec is None:
             return
         expired_keys = [k for k, v in self.cache2_validated.items() if sim_t > v.expires_ts]
         for k in expired_keys:
             del self.cache2_validated[k]
             self.cache1_suspects.pop(k, None)
         self.cache2_expirations += len(expired_keys)
+
+        expired_c1_keys = [
+            k
+            for k, v in self.cache1_suspects.items()
+            if v.status == "OBSERVING" and (sim_t - v.last_ts) > ttl_sec
+        ]
+        for k in expired_c1_keys:
+            del self.cache1_suspects[k]
+        self.cache1_expirations += len(expired_c1_keys)
 
     def process_frame(self, frame_idx: int, sim_t: float, key: int) -> int:
         """Coordinator path: returns 0 (ALLOW) or 1 (BLOCK / Active Error Flag)."""
@@ -438,11 +478,25 @@ class ThreeThreadIPSEngine:
         # Cache 2 miss (or baseline mode) -> synchronous Stage-1 (iForest_5F)
         self._q_s1_in.put(frame_idx)
         pred1 = self._q_s1_out.get()
+        if isinstance(pred1, BaseException):
+            raise RuntimeError(
+                f"Stage-1 worker failure for frame_idx={frame_idx} at sim_t={sim_t}"
+            ) from pred1
         if pred1 == 0 or not cfg.use_stage2:
             return pred1
 
-        # Stage 1 flagged anomaly: update Cache 1 and asynchronously schedule Stage 2
+        # Stage 1 flagged anomaly: lazily expire stale OBSERVING entry before updating Cache 1
         c1_entry = self.cache1_suspects.get(key)
+        if (
+            c1_entry is not None
+            and cfg.cache2_ttl_sec is not None
+            and c1_entry.status == "OBSERVING"
+            and (sim_t - c1_entry.last_ts) > cfg.cache2_ttl_sec
+        ):
+            del self.cache1_suspects[key]
+            self.cache1_expirations += 1
+            c1_entry = None
+
         if c1_entry is None:
             c1_entry = Cache1Entry(alert_count=1, status="OBSERVING", last_ts=sim_t)
             self.cache1_suspects[key] = c1_entry
@@ -468,13 +522,14 @@ class ThreeThreadIPSEngine:
             ready_ts = sim_t + cfg.stage2_sim_latency_sec
             done_evt = threading.Event()
             result_holder: List[Optional[Cache2Entry]] = [None]
+            error_holder: List[Optional[BaseException]] = [None]
             heapq.heappush(
                 self._in_flight_stage2,
-                (ready_ts, self._s2_seq, key, done_evt, result_holder),
+                (ready_ts, self._s2_seq, key, done_evt, result_holder, error_holder),
             )
             self._s2_seq += 1
             self._q_s2_in.put(
-                (frame_idx, ready_ts, cfg.cache2_ttl_sec, done_evt, result_holder)
+                (frame_idx, ready_ts, cfg.cache2_ttl_sec, done_evt, result_holder, error_holder)
             )
             self.stage2_dispatches += 1
 
@@ -571,81 +626,87 @@ def run_single_simulation(
     prev_sim_t = -math.inf
 
     t_sim_start = time.perf_counter()
-    while trace_idx < n_frames or retransmit_heap:
-        has_trace = trace_idx < n_frames
-        if retransmit_heap and (not has_trace or retransmit_heap[0][0] <= float(timestamps[trace_idx])):
-            sim_t, _, frame_idx, attempt, expected_epoch = heappop(retransmit_heap)
-            is_retransmission = True
-        else:
-            frame_idx = trace_idx
-            sim_t = float(timestamps[frame_idx])
-            trace_idx += 1
-            attempt = 0
-            expected_epoch = -1
-            is_retransmission = False
-
-        if sim_t < prev_sim_t:
-            raise AssertionError(f"Non-monotonic simulation clock: {sim_t} < {prev_sim_t}")
-        prev_sim_t = sim_t
-
-        if processed_events > 0 and processed_events % 50000 == 0:
-            engine.sweep_expired(sim_t)
-        processed_events += 1
-
-        cid = int(cids_int[frame_idx])
-        key = keys[frame_idx]
-
-        if not is_retransmission:
-            y_true = int(labels[frame_idx])
-            if y_true == 1:
-                stream_attack_total += 1
-                verdict = engine.process_frame(frame_idx, sim_t, key)
-                if verdict == 1:
-                    attack_tp += 1
-                else:
-                    attack_fn += 1
-                continue
-
-            # New legitimate ECU frame arrival (Label == 0)
-            stream_normal_total += 1
-            ecu = ecus.get(cid)
-            if ecu is None:
-                ecu = EcuErrorState()
-                ecus[cid] = ecu
-
-            if sim_t < ecu.bus_off_until:
-                ecu.dropped_while_bus_off += 1
-                continue
-        else:
-            # Scheduled legitimate retransmission event (attempt >= 1)
-            ecu = ecus[cid]
-            if ecu.bus_off_epoch != expected_epoch or sim_t < ecu.bus_off_until:
-                # Pending TX buffer was flushed when ECU transitioned to Bus-Off
-                stream_fp_unrescued_lost += 1
-                continue
-
-        verdict = engine.process_frame(frame_idx, sim_t, key)
-        if verdict == 0:
-            if is_retransmission:
-                stream_fp_rescued_retrans += 1
+    try:
+        while trace_idx < n_frames or retransmit_heap:
+            has_trace = trace_idx < n_frames
+            if retransmit_heap and (
+                not has_trace or retransmit_heap[0][0] <= float(timestamps[trace_idx])
+            ):
+                sim_t, _, frame_idx, attempt, expected_epoch = heappop(retransmit_heap)
+                is_retransmission = True
             else:
-                stream_tn_first_try += 1
-            _record_ecu_success(ecu)
-            continue
+                frame_idx = trace_idx
+                sim_t = float(timestamps[frame_idx])
+                trace_idx += 1
+                attempt = 0
+                expected_epoch = -1
+                is_retransmission = False
 
-        if not is_retransmission:
-            stream_fp_initial += 1
-        total_legit_aborts += 1
-        hit_bus_off = _record_ecu_abort_error(ecu, sim_t, recovery_sec)
-        if hit_bus_off:
-            stream_fp_unrescued_lost += 1
-        else:
-            delay = retransmit_slot + (passive_suspend if ecu.in_passive else 0.0)
-            heappush(retransmit_heap, (sim_t + delay, seq, frame_idx, attempt + 1, ecu.bus_off_epoch))
-            seq += 1
+            if sim_t < prev_sim_t:
+                raise AssertionError(f"Non-monotonic simulation clock: {sim_t} < {prev_sim_t}")
+            prev_sim_t = sim_t
 
-    wall_sec = time.perf_counter() - t_sim_start
-    engine.shutdown()
+            if processed_events > 0 and processed_events % 50000 == 0:
+                engine.sweep_expired(sim_t)
+            processed_events += 1
+
+            cid = int(cids_int[frame_idx])
+            key = keys[frame_idx]
+
+            if not is_retransmission:
+                y_true = int(labels[frame_idx])
+                if y_true == 1:
+                    stream_attack_total += 1
+                    verdict = engine.process_frame(frame_idx, sim_t, key)
+                    if verdict == 1:
+                        attack_tp += 1
+                    else:
+                        attack_fn += 1
+                    continue
+
+                # New legitimate ECU frame arrival (Label == 0)
+                stream_normal_total += 1
+                ecu = ecus.get(cid)
+                if ecu is None:
+                    ecu = EcuErrorState()
+                    ecus[cid] = ecu
+
+                if sim_t < ecu.bus_off_until:
+                    ecu.dropped_while_bus_off += 1
+                    continue
+            else:
+                # Scheduled legitimate retransmission event (attempt >= 1)
+                ecu = ecus[cid]
+                if ecu.bus_off_epoch != expected_epoch or sim_t < ecu.bus_off_until:
+                    # Pending TX buffer was flushed when ECU transitioned to Bus-Off
+                    stream_fp_unrescued_lost += 1
+                    continue
+
+            verdict = engine.process_frame(frame_idx, sim_t, key)
+            if verdict == 0:
+                if is_retransmission:
+                    stream_fp_rescued_retrans += 1
+                else:
+                    stream_tn_first_try += 1
+                _record_ecu_success(ecu)
+                continue
+
+            if not is_retransmission:
+                stream_fp_initial += 1
+            total_legit_aborts += 1
+            hit_bus_off = _record_ecu_abort_error(ecu, sim_t, recovery_sec)
+            if hit_bus_off:
+                stream_fp_unrescued_lost += 1
+            else:
+                delay = retransmit_slot + (passive_suspend if ecu.in_passive else 0.0)
+                heappush(
+                    retransmit_heap,
+                    (sim_t + delay, seq, frame_idx, attempt + 1, ecu.bus_off_epoch),
+                )
+                seq += 1
+    finally:
+        wall_sec = time.perf_counter() - t_sim_start
+        engine.shutdown()
 
     dropped_during_bus_off = sum(e.dropped_while_bus_off for e in ecus.values())
     assert stream_fp_initial == stream_fp_rescued_retrans + stream_fp_unrescued_lost
@@ -723,6 +784,7 @@ def run_single_simulation(
         "stage2_calls": engine.stage2_calls,
         "stage2_avg_us": s2_avg_us,
         "cache1_dedup_hits": engine.cache1_dedup_hits,
+        "cache1_expirations": engine.cache1_expirations,
         "cache2_hits": engine.cache2_hits,
         "cache2_hit_allow": engine.cache2_hit_allow,
         "cache2_hit_block": engine.cache2_hit_block,

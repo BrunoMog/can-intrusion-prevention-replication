@@ -54,6 +54,13 @@ class _StubStage2:
         return (0, 0.25) if self.allow_all else (1, -0.25)
 
 
+class _FailingStage2:
+    """Stub raising an exception inside Stage-2 inference to verify no-deadlock propagation."""
+
+    def predict_one(self, can_id_int: int, x8_row: np.ndarray) -> Tuple[int, float]:
+        raise ValueError("synthetic Stage-2 inference error")
+
+
 class _RecordingEngine(poc_simulator.ThreeThreadIPSEngine):
     """Spy subclass capturing monotonically ordered (frame_idx, sim_t) calls."""
 
@@ -187,6 +194,108 @@ class TestSimulatorAndIntegrity(unittest.TestCase):
             self.assertEqual(engine.stage2_dispatches, 1)
         finally:
             engine.shutdown()
+
+    def test_cache1_observing_independent_ttl_expiration_and_sweep(self) -> None:
+        """Unpromoted OBSERVING entries in Cache 1 must expire lazily and on periodic sweep."""
+        stream = _make_stream(
+            [
+                (0.000000, 0x101, 10, 0),
+                (0.050000, 0x102, 11, 0),
+                (0.200000, 0x103, 12, 0),
+            ]
+        )
+        cfg = poc_simulator.SimulationConfig(
+            name="Cache1TTLCheck",
+            use_stage2=True,
+            use_caches=True,
+            cache1_trigger_count=2,
+            cache2_ttl_sec=0.100,
+            stage2_sim_latency_sec=0.000200,
+            retransmit_slot_sec=0.000260,
+            passive_suspend_sec=0.000016,
+            bus_off_recovery_sec=0.050,
+        )
+        engine = poc_simulator.ThreeThreadIPSEngine(
+            cfg,
+            stream,
+            fast_s1=_StubStage1({10, 11, 12}),  # type: ignore[arg-type]
+            fast_s2=_StubStage2(allow_all=True),  # type: ignore[arg-type]
+        )
+        try:
+            key_a, key_b, key_c = stream.packed_keys
+            # Two single alerts become OBSERVING without promoting to Cache 2
+            self.assertEqual(engine.process_frame(0, 0.000000, key_a), 1)
+            self.assertEqual(engine.process_frame(1, 0.050000, key_b), 1)
+            self.assertEqual(len(engine.cache1_suspects), 2)
+            self.assertEqual(len(engine.cache2_validated), 0)
+            self.assertEqual(engine.stage2_dispatches, 0)
+
+            # At t=0.101, key_a (age 101 ms > 100 ms) must be pruned independently of Cache 2
+            engine.sweep_expired(0.101000)
+            self.assertNotIn(key_a, engine.cache1_suspects)
+            self.assertIn(key_b, engine.cache1_suspects)
+            self.assertEqual(engine.cache1_expirations, 1)
+
+            # At t=0.151, key_b (age 101 ms > 100 ms) must also be pruned
+            engine.sweep_expired(0.151000)
+            self.assertEqual(len(engine.cache1_suspects), 0)
+            self.assertEqual(engine.cache1_expirations, 2)
+
+            # Lazy TTL reset: alert at t=0.200 followed by gap > 100 ms (t=0.305) must NOT trigger Stage 2
+            self.assertEqual(engine.process_frame(2, 0.200000, key_c), 1)
+            self.assertEqual(engine.cache1_suspects[key_c].alert_count, 1)
+            self.assertEqual(engine.process_frame(2, 0.305000, key_c), 1)
+            self.assertEqual(engine.cache1_expirations, 3)
+            self.assertEqual(engine.cache1_suspects[key_c].alert_count, 1)
+            self.assertEqual(engine.cache1_suspects[key_c].status, "OBSERVING")
+            self.assertEqual(engine.stage2_dispatches, 0)
+
+            # Re-arrival within TTL (260 us later) reaches trigger_count=2 and dispatches Stage 2
+            self.assertEqual(engine.process_frame(2, 0.305260, key_c), 1)
+            self.assertEqual(engine.cache1_suspects[key_c].status, "PENDING")
+            self.assertEqual(engine.stage2_dispatches, 1)
+        finally:
+            engine.shutdown()
+
+    def test_stage2_worker_exception_sets_event_and_propagates(self) -> None:
+        """Worker errors must always signal done_evt and propagate without deadlocking."""
+        stream = _make_stream([(0.000000, 0x100, 10, 0)])
+        cfg = poc_simulator.SimulationConfig(
+            name="WorkerErrorCheck",
+            use_stage2=True,
+            use_caches=True,
+            cache1_trigger_count=1,
+            cache2_ttl_sec=0.100,
+            stage2_sim_latency_sec=0.000200,
+        )
+        engine = poc_simulator.ThreeThreadIPSEngine(
+            cfg,
+            stream,
+            fast_s1=_StubStage1({10}),  # type: ignore[arg-type]
+            fast_s2=_FailingStage2(),  # type: ignore[arg-type]
+        )
+        try:
+            key = stream.packed_keys[0]
+            self.assertEqual(engine.process_frame(0, 0.000000, key), 1)
+            done_evt = engine._in_flight_stage2[0][3]
+            self.assertTrue(
+                done_evt.wait(timeout=2.0),
+                "done_evt was not set in finally block after worker exception!",
+            )
+            with self.assertRaises(RuntimeError) as ctx:
+                engine.process_frame(0, 0.000200, key)
+            self.assertIsInstance(ctx.exception.__cause__, ValueError)
+        finally:
+            engine.shutdown()
+
+        # Also ensure run_single_simulation shuts down workers cleanly on Stage-2 exception
+        with self.assertRaises(RuntimeError):
+            poc_simulator.run_single_simulation(
+                cfg,
+                stream,
+                fast_s1=_StubStage1({10}),  # type: ignore[arg-type]
+                fast_s2=_FailingStage2(),  # type: ignore[arg-type]
+            )
 
     def test_error_passive_suspend_transmission_and_bus_off_flush(self) -> None:
         """Verify 16 us Suspend Transmission after TEC > 127 and epoch flush on Bus-Off."""
