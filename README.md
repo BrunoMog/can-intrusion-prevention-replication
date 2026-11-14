@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Institution: UFPE / CIn](https://img.shields.io/badge/Institution-UFPE%20%2F%20CIn-red.svg)](https://www.cin.ufpe.br/)
 
-Este repositório contém a replicação experimental rigorosa, a avaliação de generalização em um segundo conjunto de dados independente e a **prova de conceito de uma arquitetura aprimorada em dois estágios com Dual-Cache** para o artigo científico:
+Este repositório contém a replicação metodológica (`DLC = 8`), a avaliação de generalização em um segundo conjunto de dados independente e a **prova de conceito de uma arquitetura aprimorada em dois estágios com Dual-Cache** para o artigo científico:
 
 > **"An Efficient Intrusion Prevention System for CAN: Hindering Cyber-Attacks With a Low-Cost Platform"**  
 > *Paulo Freitas de Araujo-Filho, Antônio J. Pinheiro, Georges Kaddoum, Divanilson R. Campelo, and Fabio L. Soares*  
@@ -39,9 +39,9 @@ Projeto desenvolvido para a disciplina **CIN0114 — Técnicas de Ataque e Detec
 O barramento **CAN (Controller Area Network)** é o padrão dominante para comunicação entre Unidades de Controle Eletrônico (ECUs) automotivas, mas carece nativamente de autenticação, criptografia e controle de acesso.
 
 Este projeto realiza três frentes principais:
-1. **Replicação Metodológica (`DLC = 8`) do Artigo Base**: Avaliação cruzada de 10 *folds* dos 16 modelos não supervisionados ($\text{OCSVM\_1F}\dots\text{8F}$ e $\text{iForest\_1F}\dots\text{8F}$) nos ataques *Fuzzing*, *Drive Gear Spoofing* e *RPM Gauge Spoofing* do *Car-Hacking Dataset*, com validação estatística via D'Agostino-Pearson, One-Way ANOVA, Tukey HSD e teste pareado TOST ($\Delta = \pm 1{,}00\%$ p.p.).
+1. **Replicação Metodológica (`DLC = 8`) do Artigo Base**: Avaliação cruzada de 10 *folds* dos 16 modelos não supervisionados (`OCSVM_1F`…`OCSVM_8F` e `iForest_1F`…`iForest_8F`) nos ataques *Fuzzing*, *Drive Gear Spoofing* e *RPM Gauge Spoofing* do *Car-Hacking Dataset*, com análise estatística exploratória via D'Agostino-Pearson, One-Way ANOVA, Tukey HSD e TOST pareado (`Δ = ±1,00%` p.p., executado independentemente do filtro da ANOVA).
 2. **Generalização em Segundo Dataset Independente**: Avaliação completa do protocolo (com particionamento proporcional em 10 *folds* sem vazamento de dados) no cenário físico *Prototype Speedometer Spoofing*.
-3. **Proposta de Melhoria e Prova de Conceito (`poc_ips/`)**: Arquitetura IPS assíncrona em **dois estágios** ($\text{iForest\_5F} \rightarrow \text{CAN\_ID} + 8\text{ bytes}$, exclusivamente com *Isolation Forest*) executada em **três *threads*** com memória compartilhada (motor em C validado por suíte executável de equivalência contra o `scikit-learn`), sistema **Dual-Cache** com expiração temporal limitada ($\text{TTL} = 100\text{ ms}$) e avaliação em modelo simplificado orientado a traços por `CAN_ID` de confinamento de erros CAN 2.0A (`TEC += 8`, `Error Warning >= 96`, `Error Passive > 127`, `Bus-Off > 255`), incluindo análise de sensibilidade paramétrica.
+3. **Proposta de Melhoria e Prova de Conceito (`poc_ips/`)**: Arquitetura IPS física ativa em linha (*inline*) assíncrona em **dois estágios** (`iForest_5F → CAN_ID + 8 bytes`, exclusivamente com *Isolation Forest*) executada em **três *threads*** com memória compartilhada (motor em C validado por suítes executáveis contra o `scikit-learn`), sistema **Dual-Cache** com expiração temporal limitada (`TTL = 100 ms`) e avaliação via simulador orientado a eventos cronológicos globais (`heapq`) de confinamento de erros CAN 2.0A por `CAN_ID` (`TEC += 8`, `Error Warning >= 96`, penalidade *Suspend Transmission* de `16 us` em `Error Passive > 127`, descarte de fila em `Bus-Off > 255`), incluindo análise de sensibilidade paramétrica.
 
 ---
 
@@ -64,10 +64,11 @@ projeto_CIN0114/
 ├── poc_ips/                                  # Prova de Conceito: IPS 2 Estágios + Dual-Cache (3 threads)
 │   ├── fast_iforest.c                        # Motor nativo em C para inferência por quadro único
 │   ├── fast_iforest.py                       # Wrapper ctypes (sem APIs privadas) + Liu et al. c(n)
-│   ├── test_equivalence.py                   # Testes unitários e de equivalência C vs scikit-learn
+│   ├── test_equivalence.py                   # Testes unitários sintéticos e de integração C vs sklearn
+│   ├── test_simulator.py                     # Testes determinísticos de fila heapq, Error Passive, TOST e SHA-256
 │   ├── models_stage2.py                      # Modelos Estágio 2 (9F Global e Híbridos por CAN ID)
 │   ├── train_stage2.py                       # Treinamento/seleção 10-Fold CV e avaliação em cascata
-│   ├── poc_simulator.py                      # Motor 3-threads Dual-Cache + modelo CAN 2.0A por CAN ID + --sensitivity
+│   ├── poc_simulator.py                      # Motor 3-threads Dual-Cache + fila heapq CAN 2.0A por CAN ID + --sensitivity
 │   ├── models/                               # Modelos Estágio 1/2 persistidos (.joblib, ignorado)
 │   │   └── .gitkeep
 │   └── results/                              # CSVs da PoC (versionados) e figuras (ignoradas)
@@ -78,7 +79,7 @@ projeto_CIN0114/
 │       └── .gitkeep
 ├── relatorio/                                # Relatório técnico em formato IEEEtran (LaTeX + PDF)
 │   ├── relatorio_can_ips.tex                 # Código-fonte LaTeX principal
-│   ├── relatorio_can_ips.pdf                 # Relatório compilado final (14 páginas)
+│   ├── relatorio_can_ips.pdf                 # Relatório compilado final (15 páginas)
 │   ├── IEEEtran.cls                          # Classe IEEEtran Conference
 │   ├── fig_eda_signatures.png                # Fig. 1: Assinaturas de bytes e PCA (EDA)
 │   ├── fig_bytes_progression.png             # Fig. 2: Evolução da acurácia por N bytes (Fuzzing)
@@ -154,10 +155,10 @@ Os experimentos empregam quatro conjuntos de dados públicos com mensagens filtr
 
 ## 5. Análise Exploratória de Dados (EDA)
 
-O notebook [EDA_CAN_Intrusion_Datasets.ipynb](EDA_CAN_Intrusion_Datasets.ipynb) (gerado via [build_notebook.py](build_notebook.py)) conduz toda a exploração **exclusivamente sobre as partições de Treinamento e Validação** ($0\dots 299.999$ no *Car-Hacking* e $27.500$ quadros no *Speedometer*), preservando os conjuntos de teste intactos:
+O notebook [EDA_CAN_Intrusion_Datasets.ipynb](EDA_CAN_Intrusion_Datasets.ipynb) (gerado via [build_notebook.py](build_notebook.py)) conduz toda a exploração **exclusivamente sobre as partições de Treinamento e Validação** (quadros `0..299.999` no *Car-Hacking* e `27.500` quadros no *Speedometer*), preservando os conjuntos de teste intactos:
 * Auditoria de contagens e distribuição por `CAN_ID`;
-* Perfis espaciais dos bytes normalizados $D_0 \dots D_7$ e identificação de fronteiras de separabilidade (ex.: $D_2 = \texttt{0x7E}$ no *Speedometer*);
-* Análise de separabilidade via PCA e dinâmica temporal ($\Delta t$).
+* Perfis espaciais dos bytes normalizados (`D0..D7`) e identificação de fronteiras de separabilidade (ex.: `D2 = 0x7E` no *Speedometer*);
+* Análise de separabilidade via PCA e dinâmica temporal (`Δt`).
 
 ---
 
@@ -169,7 +170,7 @@ O notebook [EDA_CAN_Intrusion_Datasets.ipynb](EDA_CAN_Intrusion_Datasets.ipynb) 
 # Smoke test rápido
 python run_experiments.py --datasets Fuzzing --grid smoke
 
-# Replicação completa (grade full nos 3 datasets do artigo)
+# Replicação metodológica completa nos 3 datasets do artigo (DLC = 8)
 python run_experiments.py --datasets Fuzzing "Drive Gear" "RPM Gauge" --models OCSVM iForest --bytes 1 2 3 4 5 6 7 8 --grid full --folds 10
 
 # Avaliação separada no 2º dataset (Speedometer)
@@ -177,7 +178,7 @@ python run_experiments.py --datasets Speedometer --models iForest --bytes 1 2 3 
 python run_experiments.py --datasets Speedometer --models OCSVM --bytes 1 2 3 4 5 6 7 8 --grid full --folds 10
 ```
 
-O pipeline utiliza leitura em *streaming*, fatoração exata de limiares na validação cruzada do *Isolation Forest* e retomada incremental via `--resume` (ativa por padrão).
+O pipeline utiliza leitura em *streaming*, fatoração exata de limiares na validação cruzada do *Isolation Forest*, verificação estrita de integridade SHA-256 integral de arquivo nos caches de *splits* (`utils.py`) e retomada incremental estrita via `--resume` (ativa por padrão; flags `--no-strict-checkpoint` e `--allow-legacy-checkpoint` disponíveis caso seja necessário reaproveitar checkpoints antigos).
 
 ### Análise Estatística e Matrizes de Confusão ([post_analysis.py](post_analysis.py))
 
@@ -185,17 +186,17 @@ O pipeline utiliza leitura em *streaming*, fatoração exata de limiares na vali
 python post_analysis.py --fig5_dataset Fuzzing
 ```
 
-Executa os testes D'Agostino-Pearson, One-Way ANOVA, *post-hoc* de Tukey HSD e equivalência pareada TOST ($\Delta = \pm 1{,}00\%$ p.p. vs `iForest_8F`), compara os resultados com métricas reportadas da literatura (**GIDS** — Seo *et al.*, **DCNN** e **LSTM-IDS** — Song *et al.*, **MTH-IDS** — Yang *et al.*) e gera `results/figure5_confusion_matrices.png`.
+Executa os testes D'Agostino-Pearson, One-Way ANOVA, *post-hoc* de Tukey HSD e TOST pareado (`Δ = ±1,00%` p.p. vs `iForest_8F`, executado de forma incondicional independentemente do resultado da ANOVA e interpretado como evidência exploratória devido à sobreposição `9/10` dos *folds* e pós-seleção), compara os resultados com métricas reportadas da literatura (**GIDS** — Seo *et al.*, **DCNN** e **LSTM-IDS** — Song *et al.*, **MTH-IDS** — Yang *et al.*) e gera `results/figure5_confusion_matrices.png`.
 
 ---
 
 ## 7. Melhoria Proposta e Prova de Conceito (`poc_ips/`)
 
-Para atacar os falsos positivos do modelo $\text{iForest\_5F}$ e evitar o bloqueio em cascata de ECUs legítimas por *Bus-Off* (`TEC += 8` a cada *Error Frame* consecutivo até `TEC > 255`), o diretório [`poc_ips/`](poc_ips/) implementa uma arquitetura em dois estágios com três *threads* em memória compartilhada:
+Para atacar os falsos positivos do modelo `iForest_5F` e evitar o bloqueio em cascata de ECUs legítimas por *Bus-Off* (`TEC += 8` a cada *Active Error Flag* injetado pelo IPS físico em linha até `TEC > 255`), o diretório [`poc_ips/`](poc_ips/) implementa uma arquitetura em dois estágios com três *threads* em memória compartilhada (avaliada sob escalonador global cronológico `heapq`, penalidade de *Suspend Transmission* de `16 us` em `Error Passive` e descarte de retransmissões enfileiradas em `Bus-Off`):
 
-* **Estágio 1 (`Worker_Stage1`)**: modelo $\text{iForest\_5F}$ pré-carregado atuando de forma síncrona no 5º byte ($D_0 \dots D_4$).
-* **Estágio 2 Assíncrono (`Worker_Stage2`)**: modelo exclusivo de *Isolation Forest* com `CAN_ID` normalizado + $8$ bytes ($D_0 \dots D_7$), avaliando variantes globais (`iForest_9F_Global`) e híbridas condicionadas por identificador (`iForest_Hybrid_Fallback`, `iForest_Hybrid_StrictUnknown`).
-* **Coordenador com Dual-Cache (`Coordinator`)**: chave compacta de 75 bits `(CAN_ID << 64) | payload_64`, **Cache 1** para rastreamento/deduplicação de alertas suspeitos ($k_{\text{trig}}$ configurável) e **Cache 2** com expiração temporal limitada ($\text{TTL} = 100\text{ ms}$, invalidação *lazy* + varredura periódica a cada 50 mil quadros) para respostas em $\mathcal{O}(1)$ antes de nova penalização do `TEC` (não provê proteção *anti-replay*).
+* **Estágio 1 (`Worker_Stage1`)**: modelo `iForest_5F` pré-carregado atuando de forma síncrona no 5º byte (`D0..D4`).
+* **Estágio 2 Assíncrono (`Worker_Stage2`)**: modelo exclusivo de *Isolation Forest* com `CAN_ID` normalizado + `8` bytes (`D0..D7`), avaliando variantes globais (`iForest_9F_Global`) e híbridas condicionadas por identificador (`iForest_Hybrid_Fallback`, `iForest_Hybrid_StrictUnknown`).
+* **Coordenador com Dual-Cache (`Coordinator`)**: chave compacta de 75 bits `(CAN_ID << 64) | payload_64`, **Cache 1** para rastreamento/deduplicação de alertas suspeitos (`k_trig` configurável) e **Cache 2** com expiração temporal limitada (`TTL = 100 ms`, invalidação *lazy* + varredura periódica a cada 50 mil quadros) para respostas em `O(1)` antes de nova penalização do `TEC` (não provê proteção *anti-replay*).
 
 ### Comandos da PoC
 
@@ -204,7 +205,11 @@ Para atacar os falsos positivos do modelo $\text{iForest\_5F}$ e evitar o bloque
 python poc_ips/train_stage2.py --datasets Speedometer Fuzzing "Drive Gear" "RPM Gauge"
 
 # Verificação de equivalência numérica e decisória do motor nativo em C vs scikit-learn
+# (defina CAN_IPS_EQUIV_MAX_SCAN=0 para varrer 100% dos traços reais)
 python poc_ips/test_equivalence.py
+
+# Testes unitários determinísticos (heapq cronológico, Error Passive/Bus-Off, TOST, SHA-256 e checkpoints)
+python poc_ips/test_simulator.py
 
 # Etapas 2–4: Simulação PoC em 3 threads + modelo CAN 2.0A por CAN ID + ablações e figuras
 python poc_ips/poc_simulator.py --datasets Speedometer Fuzzing "Drive Gear" "RPM Gauge"
