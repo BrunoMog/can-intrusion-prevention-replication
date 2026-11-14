@@ -275,24 +275,32 @@ def audit_against_paper_table_2(datasets_dict: Optional[Dict[str, str]] = None) 
 # 2. SISTEMA DE INDEXAÇÃO E PARTICIONAMENTO REPRODUZÍVEL COM CACHE (.NPZ)
 # ==============================================================================
 
+def _compute_file_sha256(filepath: str) -> str:
+    """Calcula SHA-256 integral do arquivo em streaming (~400 MB/s via hashlib.file_digest)."""
+    with open(filepath, 'rb') as f:
+        if hasattr(hashlib, 'file_digest'):
+            return hashlib.file_digest(f, 'sha256').hexdigest()
+        h = hashlib.sha256()
+        for chunk in iter(lambda: f.read(1048576), b''):
+            h.update(chunk)
+        return h.hexdigest()
+
+
 def compute_dataset_fingerprint(
     filepath_or_name: str,
     random_state: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Computa impressão digital leve (tamanho, mtime, SHA-256 do cabeçalho e split_config)."""
+    """Computa impressão digital integral do dataset (tamanho, mtime, SHA-256 completo e split_config)."""
     resolved = _resolve_filepath(filepath_or_name)
     if not os.path.exists(resolved):
         raise FileNotFoundError(f"Arquivo não encontrado para fingerprint: {resolved}")
     st = os.stat(resolved)
-    h = hashlib.sha256()
-    with open(resolved, 'rb') as f:
-        h.update(f.read(65536))
     meta: Dict[str, Any] = {
         'filepath': os.path.abspath(resolved),
         'basename': os.path.basename(resolved),
         'file_size_bytes': int(st.st_size),
         'file_mtime_ns': int(st.st_mtime_ns),
-        'head_sha256': h.hexdigest(),
+        'file_sha256': _compute_file_sha256(resolved),
         'split_config': _get_split_config(filepath_or_name),
     }
     if random_state is not None:
@@ -305,7 +313,8 @@ def get_split_indices(
     random_state: int = 42,
     cache_dir: str = "splits_cache",
     force_recompute: bool = False,
-    strict_fingerprint: bool = False,
+    strict_fingerprint: bool = True,
+    allow_legacy_without_meta: bool = False,
 ) -> Dict[str, np.ndarray]:
     """
     Retorna os índices das linhas correspondentes aos conjuntos de Treino, Validação e Teste
@@ -321,7 +330,7 @@ def get_split_indices(
     - 10-Fold Cross-Validation: O conjunto normal de 250k é particionado em 10 folds
       de 25k, permitindo rotacionar o fold de validação.
       
-    Utiliza cache em arquivo .npz para acelerar execuções futuras de 4s para 0.01s.
+    Utiliza cache em arquivo .npz com verificação estrita de integridade via SHA-256 integral (.meta.json).
     """
     filepath = _resolve_filepath(filepath_or_name)
     os.makedirs(cache_dir, exist_ok=True)
@@ -339,7 +348,7 @@ def get_split_indices(
                     saved_fp = json.load(mf)
                 mismatches = [
                     k
-                    for k in ('file_size_bytes', 'head_sha256', 'random_state', 'split_config')
+                    for k in ('file_size_bytes', 'file_sha256', 'random_state', 'split_config')
                     if saved_fp.get(k) != current_fp.get(k)
                 ]
                 if mismatches:
@@ -353,6 +362,12 @@ def get_split_indices(
                 print(f" [CACHE WARNING] Falha ao ler '{meta_path}': {exc}")
                 if strict_fingerprint:
                     cache_valid = False
+        elif not allow_legacy_without_meta:
+            print(
+                f" [CACHE WARNING] '{cache_path}' sem metadados '.meta.json'; "
+                "recomputando partições com verificação SHA-256 integral."
+            )
+            cache_valid = False
         if cache_valid:
             loaded = np.load(cache_path)
             return {key: loaded[key] for key in loaded.files}

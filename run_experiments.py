@@ -99,7 +99,8 @@ class CheckpointManager:
         test_csv_path: str,
         resume: bool = True,
         expected_metadata: Optional[Dict[str, Any]] = None,
-        strict_checkpoint: bool = False,
+        strict_checkpoint: bool = True,
+        allow_legacy_checkpoint: bool = False,
         logger: Optional[logging.Logger] = None,
     ):
         self.cv_csv_path = cv_csv_path
@@ -108,6 +109,7 @@ class CheckpointManager:
         self.resume = resume
         self.expected_metadata = expected_metadata
         self.strict_checkpoint = strict_checkpoint
+        self.allow_legacy_checkpoint = allow_legacy_checkpoint
         self.logger = logger
         self.completed_cv_keys = set()
         self.completed_test_keys = set()
@@ -128,7 +130,7 @@ class CheckpointManager:
             raise RuntimeError(msg)
 
     def _validate_checkpoint_metadata(self) -> None:
-        """Valida se seed, cv_folds, grade e fingerprints de datasets batem ao retomar CSV."""
+        """Valida se seed, cv_folds, grade e SHA-256 integral de datasets batem ao retomar CSV."""
         if not self.expected_metadata:
             return
 
@@ -146,7 +148,7 @@ class CheckpointManager:
                     cur_fps = self.expected_metadata.get('dataset_fingerprints', {})
                     for ds_name, cur_fp in cur_fps.items():
                         if ds_name in saved_fps:
-                            for fk in ('file_size_bytes', 'head_sha256', 'split_config'):
+                            for fk in ('file_size_bytes', 'file_sha256', 'split_config'):
                                 if saved_fps[ds_name].get(fk) != cur_fp.get(fk):
                                     self._warn_or_fail(
                                         f"Fingerprint de '{ds_name}' diverge em '{fk}' contra checkpoint salvo."
@@ -157,11 +159,16 @@ class CheckpointManager:
                     self._warn_or_fail(f"Falha ao ler '{self.meta_path}': {exc}")
             else:
                 msg = (
-                    f"Checkpoint CSV '{self.cv_csv_path}' não possui 'checkpoint_meta.json' "
-                    "(artefato legado); retomada preservada."
+                    f"Checkpoint CSV '{self.cv_csv_path}' não possui 'checkpoint_meta.json'. "
+                    "Use --allow-legacy-checkpoint ou --no-resume para prosseguir."
                 )
-                if self.logger is not None:
-                    self.logger.info(msg)
+                if self.allow_legacy_checkpoint:
+                    if self.logger is not None:
+                        self.logger.info(msg)
+                    else:
+                        print(f"[CHECKPOINT INFO] {msg}")
+                else:
+                    self._warn_or_fail(msg)
         elif not os.path.exists(self.cv_csv_path) or not self.resume:
             with open(self.meta_path, 'w', encoding='utf-8') as f:
                 json.dump(self.expected_metadata, f, indent=2, sort_keys=True)
@@ -460,7 +467,8 @@ def run_experiment_pipeline(
     save_models: bool = False,
     force_test: bool = False,
     random_state: int = config.DEFAULT_SEED,
-    strict_checkpoint: bool = False,
+    strict_checkpoint: bool = True,
+    allow_legacy_checkpoint: bool = False,
 ):
     """
     Executa o pipeline completo de experimentos com salvamento incremental e logs.
@@ -502,6 +510,7 @@ def run_experiment_pipeline(
         resume=resume,
         expected_metadata=expected_metadata,
         strict_checkpoint=strict_checkpoint,
+        allow_legacy_checkpoint=allow_legacy_checkpoint,
         logger=logger,
     )
 
@@ -792,8 +801,16 @@ def parse_args():
         help="Semente aleatória para partições e modelos"
     )
     parser.add_argument(
-        "--strict-checkpoint", action="store_true", default=False,
-        help="Aborta se metadados do checkpoint (seed, cv_folds, dataset) divergirem"
+        "--strict-checkpoint", dest="strict_checkpoint", action="store_true", default=True,
+        help="Aborta se metadados do checkpoint divergirem (comportamento padrão ativo)"
+    )
+    parser.add_argument(
+        "--no-strict-checkpoint", dest="strict_checkpoint", action="store_false",
+        help="Rebaixa divergências de metadados do checkpoint para avisos"
+    )
+    parser.add_argument(
+        "--allow-legacy-checkpoint", action="store_true", default=False,
+        help="Permite retomar CSV legado sem arquivo checkpoint_meta.json"
     )
     return parser.parse_args()
 
@@ -817,4 +834,5 @@ if __name__ == "__main__":
         force_test=args.force_test,
         random_state=args.seed,
         strict_checkpoint=args.strict_checkpoint,
+        allow_legacy_checkpoint=args.allow_legacy_checkpoint,
     )

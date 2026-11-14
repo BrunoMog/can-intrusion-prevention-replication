@@ -172,17 +172,18 @@ def run_statistical_analysis(best_models_dict: Dict[str, Dict[str, Dict[str, Any
             else:
                 print("   -> Conclusão: Não há diferença estatisticamente significativa entre os modelos (p >= 0.05).")
 
+            ref_model = 'iForest_8F' if 'iForest_8F' in model_names_list else model_names_list[-1]
+
             # 3. Teste Post-Hoc de Tukey HSD
             if anova_p < 0.05 and hasattr(stats, 'tukey_hsd'):
                 print(
                     "\n3. Teste Post-Hoc Tukey HSD "
-                    "(Nota: 10 folds compartilham 9/10 do treino e, no Car-Hacking, "
-                    "as mesmas 25k amostras de ataque na validação):"
+                    "(Nota exploratória: 10 folds compartilham 9/10 do treino, ataques de validação "
+                    "no Car-Hacking, e usam hiperparâmetros pré-selecionados nos mesmos folds):"
                 )
                 tukey_res = stats.tukey_hsd(*samples_list)
 
                 # Compara cada iForest_NF com o modelo completo iForest_8F
-                ref_model = 'iForest_8F' if 'iForest_8F' in model_names_list else model_names_list[-1]
                 ref_idx = model_names_list.index(ref_model)
 
                 print(f"   Comparação com o modelo completo de referência ({ref_model}):")
@@ -213,47 +214,55 @@ def run_statistical_analysis(best_models_dict: Dict[str, Dict[str, Dict[str, Any
                         break
 
                 print(
-                    f"   🏆 Seleção (critério do artigo + Tukey HSD): iForest_{min_equivalent_n}F "
+                    f"   🏆 Seleção exploratória (critério do artigo + Tukey HSD): iForest_{min_equivalent_n}F "
                     f"utiliza o menor número de bytes (N >= {min_equivalent_n}) sem diferença significativa "
                     f"detectada contra {ref_model} (p > 0.05)."
                 )
 
-                # 4. Teste Formal de Equivalência Pareado TOST (Margem +-1,00% pp)
-                tost_margin = 1.00
-                ref_folds = np.asarray(model_fold_data[ref_model], dtype=np.float64)
-                print(
-                    f"\n4. Teste Formal de Equivalência Pareado TOST "
-                    f"(Margem Delta = +-{tost_margin:.2f}% pp vs {ref_model}, alpha=0.05):"
+            # 4. Teste Pareado de Equivalência TOST (desacoplado da ANOVA; margem +-1,00% pp)
+            tost_margin = 1.00
+            ref_folds = np.asarray(model_fold_data[ref_model], dtype=np.float64)
+            print(
+                f"\n4. Teste Pareado de Equivalência TOST (exploratório; independente da ANOVA) "
+                f"(Margem Delta = +-{tost_margin:.2f}% pp vs {ref_model}, alpha=0.05):"
+            )
+            print(
+                "   [Ressalva metodológica] Folds correlacionados (9/10 sobreposição de treino) e seleção "
+                "pós-CV nos mesmos folds: p_TOST nominal deve ser lido como evidência exploratória."
+            )
+            for m_name in model_names_list:
+                if not (m_name.startswith('iForest') and m_name != ref_model):
+                    continue
+                cand_folds = np.asarray(model_fold_data[m_name], dtype=np.float64)
+                if len(cand_folds) != len(ref_folds) or len(cand_folds) < 2:
+                    continue
+                diffs = cand_folds - ref_folds
+                n_f = len(diffs)
+                mean_d = float(np.mean(diffs))
+                sd_d = float(np.std(diffs, ddof=1))
+                if sd_d <= 1e-12:
+                    p_tost = 0.0 if abs(mean_d) < tost_margin else 1.0
+                    ci_low, ci_high = mean_d, mean_d
+                else:
+                    se_d = sd_d / np.sqrt(n_f)
+                    t_lower = (mean_d + tost_margin) / se_d
+                    t_upper = (mean_d - tost_margin) / se_d
+                    p_lower = float(1.0 - stats.t.cdf(t_lower, df=n_f - 1))
+                    p_upper = float(stats.t.cdf(t_upper, df=n_f - 1))
+                    p_tost = max(p_lower, p_upper)
+                    t_crit90 = float(stats.t.ppf(0.95, df=n_f - 1))
+                    ci_low = mean_d - t_crit90 * se_d
+                    ci_high = mean_d + t_crit90 * se_d
+                eq_label = (
+                    "Evidência exploratória de equivalência dentro de +-1,0%"
+                    if p_tost < 0.05
+                    else "Inconclusivo/Fora da margem (+-1,0%)"
                 )
-                for m_name in model_names_list:
-                    if not (m_name.startswith('iForest') and m_name != ref_model):
-                        continue
-                    cand_folds = np.asarray(model_fold_data[m_name], dtype=np.float64)
-                    if len(cand_folds) != len(ref_folds) or len(cand_folds) < 2:
-                        continue
-                    diffs = cand_folds - ref_folds
-                    n_f = len(diffs)
-                    mean_d = float(np.mean(diffs))
-                    sd_d = float(np.std(diffs, ddof=1))
-                    if sd_d <= 1e-12:
-                        p_tost = 0.0 if abs(mean_d) < tost_margin else 1.0
-                        ci_low, ci_high = mean_d, mean_d
-                    else:
-                        se_d = sd_d / np.sqrt(n_f)
-                        t_lower = (mean_d + tost_margin) / se_d
-                        t_upper = (mean_d - tost_margin) / se_d
-                        p_lower = float(1.0 - stats.t.cdf(t_lower, df=n_f - 1))
-                        p_upper = float(stats.t.cdf(t_upper, df=n_f - 1))
-                        p_tost = max(p_lower, p_upper)
-                        t_crit90 = float(stats.t.ppf(0.95, df=n_f - 1))
-                        ci_low = mean_d - t_crit90 * se_d
-                        ci_high = mean_d + t_crit90 * se_d
-                    eq_label = "Equivalente dentro de +-1,0%" if p_tost < 0.05 else "Inconclusivo/Fora da margem"
-                    print(
-                        f"     - {m_name} - {ref_model}: diff={mean_d:+.3f}% "
-                        f"(IC90% [{ci_low:+.3f}%, {ci_high:+.3f}%]), "
-                        f"p_TOST={p_tost:.4e} -> {eq_label}"
-                    )
+                print(
+                    f"     - {m_name} - {ref_model}: diff={mean_d:+.3f}% "
+                    f"(IC90% [{ci_low:+.3f}%, {ci_high:+.3f}%]), "
+                    f"p_TOST={p_tost:.4e} -> {eq_label}"
+                )
 
 
 # ==============================================================================
