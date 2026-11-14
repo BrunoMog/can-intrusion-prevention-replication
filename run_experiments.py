@@ -144,10 +144,19 @@ class CheckpointManager:
                             self._warn_or_fail(
                                 f"Divergência de '{key}' no checkpoint ({saved.get(key)} != {self.expected_metadata.get(key)})."
                             )
-                    saved_fps = saved.get('dataset_fingerprints', {})
-                    cur_fps = self.expected_metadata.get('dataset_fingerprints', {})
-                    for ds_name, cur_fp in cur_fps.items():
-                        if ds_name in saved_fps:
+                    saved_fps = saved.get('dataset_fingerprints')
+                    if not isinstance(saved_fps, dict):
+                        self._warn_or_fail(
+                            "Campo 'dataset_fingerprints' ausente ou inválido no checkpoint salvo."
+                        )
+                    else:
+                        cur_fps = self.expected_metadata.get('dataset_fingerprints', {})
+                        for ds_name, cur_fp in cur_fps.items():
+                            if ds_name not in saved_fps:
+                                self._warn_or_fail(
+                                    f"Dataset '{ds_name}' ausente em 'dataset_fingerprints' do checkpoint salvo."
+                                )
+                                continue
                             for fk in ('file_size_bytes', 'file_sha256', 'split_config'):
                                 if saved_fps[ds_name].get(fk) != cur_fp.get(fk):
                                     self._warn_or_fail(
