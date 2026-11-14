@@ -23,13 +23,17 @@ CAN 2.0A Error-Confinement model over logged traffic:
     Remaining simplification: full CAN arbitration / priority contention delays across
     distinct IDs on the wire are not rescheduled.
   - Error Passive (`TEC > 127`) & Suspend Transmission: while `in_passive` is True,
-    modeled retransmissions add Bosch's 8-bit `Suspend Transmission` penalty
-    (`passive_suspend_sec = 16 us` at 500 kbps) to `retransmit_slot_sec` (`260 us`).
+    modeled retransmissions add a simplified parameterized 8-bit `Suspend Transmission`
+    delay approximation (`passive_suspend_sec = 16 us` at 500 kbps) on top of
+    `retransmit_slot_sec` (`260 us`), rather than reconstructing bit-level
+    Error Flag / Error Delimiter / Intermission boundaries.
   - Tracks one TEC state machine per `CAN_ID` as an ECU proxy (raw traces do
     not include a DBC ECU-to-CAN_ID mapping matrix), plus `Error Warning (>= 96)`,
     `Error Passive (> 127)`, `Bus-Off (> 255)` (flushing queued pending TX for the
-    offending ECU), parameterized recovery cooldowns (50 ms nominal vs. CAN 2.0A
-    minimum ~2.8 ms), dropped outages, attack Recall, and Cache 1/Cache 2 telemetry.
+    offending ECU), an adopted nominal recovery cooldown policy (`50 ms` default,
+    distinct from hardware's `128 x 11` recessive-bit bus-idle monitor ~2.8 ms at
+    500 kbps, explored via `--sensitivity`), dropped outages, attack Recall, and
+    Cache 1/Cache 2 telemetry.
 """
 
 from __future__ import annotations
@@ -276,7 +280,11 @@ class ThreeThreadIPSEngine:
         self._cache_lock = threading.Lock()
         self.cache1_suspects: Dict[int, Cache1Entry] = {}
         self.cache2_validated: Dict[int, Cache2Entry] = {}
-        self._in_flight_stage2: Deque[Tuple[int, float, threading.Event]] = deque()
+        # Heap entries: (ready_ts, seq, key, done_evt, result_holder)
+        self._in_flight_stage2: List[
+            Tuple[float, int, int, threading.Event, List[Optional[Cache2Entry]]]
+        ] = []
+        self._s2_seq = 0
 
         # Telemetry counters
         self.stage1_calls = 0
@@ -326,15 +334,17 @@ class ThreeThreadIPSEngine:
         self.stage1_compute_sec = local_sec
 
     def _stage2_worker_loop(self) -> None:
-        """Asynchronous Stage-2 worker analyzing full (CAN_ID + 8B) frames."""
+        """Asynchronous Stage-2 worker analyzing full (CAN_ID + 8B) frames.
+
+        Computes the verdict on its own thread but writes only to the per-job
+        staging holder; the Coordinator exclusively publishes entries to Cache 2
+        once simulated time reaches `available_ts`.
+        """
         assert self.fast_s2 is not None
         cids_int = self.stream.can_ids_int
         x8_f32 = self.stream.x8_f32
         predict_s2 = self.fast_s2.predict_one
         q_in = self._q_s2_in
-        lock = self._cache_lock
-        c1 = self.cache1_suspects
-        c2 = self.cache2_validated
         local_calls = 0
         local_sec = 0.0
         perf = time.perf_counter
@@ -343,55 +353,63 @@ class ThreeThreadIPSEngine:
             item = q_in.get()
             if item is _STOP_SENTINEL:
                 break
-            key, frame_idx, available_ts, ttl_sec, done_evt = item
+            frame_idx, available_ts, ttl_sec, done_evt, result_holder = item
             t0 = perf()
             pred2, score2 = predict_s2(int(cids_int[frame_idx]), x8_f32[frame_idx])
             local_sec += perf() - t0
             local_calls += 1
 
             expires_ts = available_ts + ttl_sec if ttl_sec is not None else math.inf
-            entry2 = Cache2Entry(
+            result_holder[0] = Cache2Entry(
                 verdict=pred2,
                 available_ts=available_ts,
                 expires_ts=expires_ts,
                 score2=score2,
             )
-            with lock:
-                c2[key] = entry2
-                c1_entry = c1.get(key)
-                if c1_entry is not None:
-                    c1_entry.status = "VALIDATED"
             done_evt.set()
 
         self.stage2_calls = local_calls
         self.stage2_compute_sec = local_sec
 
     def _drain_completed_stage2(self, sim_t: float) -> None:
-        """Ensure Stage-2 async writes whose CAN completion time <= sim_t are visible."""
+        """Commit Stage-2 async results whose CAN completion time <= sim_t."""
         inflight = self._in_flight_stage2
-        while inflight and inflight[0][1] <= sim_t:
-            _, _, evt = inflight.popleft()
+        c1 = self.cache1_suspects
+        c2 = self.cache2_validated
+        while inflight and inflight[0][0] <= sim_t:
+            ready_ts, _, key, evt, result_holder = heapq.heappop(inflight)
             evt.wait()
+            entry2 = result_holder[0]
+            if entry2 is not None:
+                c2[key] = entry2
+                c1_entry = c1.get(key)
+                if c1_entry is not None:
+                    c1_entry.status = "VALIDATED"
+            if len(c2) > self.peak_cache2_entries:
+                self.peak_cache2_entries = len(c2)
 
     def _flush_all_stage2(self) -> None:
-        """Drain remaining asynchronous Stage-2 tasks cleanly before shutdown."""
+        """Wait for remaining asynchronous Stage-2 tasks cleanly before shutdown."""
         inflight = self._in_flight_stage2
         while inflight:
-            _, _, evt = inflight.popleft()
+            _, _, _, evt, _ = heapq.heappop(inflight)
             evt.wait()
 
     def sweep_expired(self, sim_t: float) -> None:
         """Periodically prune expired TTL entries to mirror embedded RAM footprint."""
-        if not self.cfg.use_caches or self.cfg.cache2_ttl_sec is None:
+        if not self.cfg.use_caches:
             return
-        with self._cache_lock:
-            self.peak_cache1_entries = max(self.peak_cache1_entries, len(self.cache1_suspects))
-            self.peak_cache2_entries = max(self.peak_cache2_entries, len(self.cache2_validated))
-            expired_keys = [k for k, v in self.cache2_validated.items() if sim_t > v.expires_ts]
-            for k in expired_keys:
-                del self.cache2_validated[k]
-                self.cache1_suspects.pop(k, None)
-            self.cache2_expirations += len(expired_keys)
+        if self._in_flight_stage2:
+            self._drain_completed_stage2(sim_t)
+        self.peak_cache1_entries = max(self.peak_cache1_entries, len(self.cache1_suspects))
+        self.peak_cache2_entries = max(self.peak_cache2_entries, len(self.cache2_validated))
+        if self.cfg.cache2_ttl_sec is None:
+            return
+        expired_keys = [k for k, v in self.cache2_validated.items() if sim_t > v.expires_ts]
+        for k in expired_keys:
+            del self.cache2_validated[k]
+            self.cache1_suspects.pop(k, None)
+        self.cache2_expirations += len(expired_keys)
 
     def process_frame(self, frame_idx: int, sim_t: float, key: int) -> int:
         """Coordinator path: returns 0 (ALLOW) or 1 (BLOCK / Active Error Flag)."""
@@ -400,19 +418,22 @@ class ThreeThreadIPSEngine:
             if self._in_flight_stage2:
                 self._drain_completed_stage2(sim_t)
 
-            with self._cache_lock:
-                entry2 = self.cache2_validated.get(key)
-                if entry2 is not None:
-                    if sim_t <= entry2.expires_ts:
-                        self.cache2_hits += 1
-                        if entry2.verdict == 0:
-                            self.cache2_hit_allow += 1
-                        else:
-                            self.cache2_hit_block += 1
-                        return entry2.verdict
-                    del self.cache2_validated[key]
-                    self.cache1_suspects.pop(key, None)
-                    self.cache2_expirations += 1
+            entry2 = self.cache2_validated.get(key)
+            if entry2 is not None:
+                if sim_t < entry2.available_ts:
+                    raise AssertionError(
+                        f"Premature Cache 2 visibility: sim_t={sim_t} < available_ts={entry2.available_ts}"
+                    )
+                if sim_t <= entry2.expires_ts:
+                    self.cache2_hits += 1
+                    if entry2.verdict == 0:
+                        self.cache2_hit_allow += 1
+                    else:
+                        self.cache2_hit_block += 1
+                    return entry2.verdict
+                del self.cache2_validated[key]
+                self.cache1_suspects.pop(key, None)
+                self.cache2_expirations += 1
 
         # Cache 2 miss (or baseline mode) -> synchronous Stage-1 (iForest_5F)
         self._q_s1_in.put(frame_idx)
@@ -421,34 +442,40 @@ class ThreeThreadIPSEngine:
             return pred1
 
         # Stage 1 flagged anomaly: update Cache 1 and asynchronously schedule Stage 2
-        with self._cache_lock:
-            c1_entry = self.cache1_suspects.get(key)
-            if c1_entry is None:
-                c1_entry = Cache1Entry(alert_count=1, status="OBSERVING", last_ts=sim_t)
-                self.cache1_suspects[key] = c1_entry
-            else:
-                c1_entry.alert_count += 1
-                c1_entry.last_ts = sim_t
+        c1_entry = self.cache1_suspects.get(key)
+        if c1_entry is None:
+            c1_entry = Cache1Entry(alert_count=1, status="OBSERVING", last_ts=sim_t)
+            self.cache1_suspects[key] = c1_entry
+        else:
+            c1_entry.alert_count += 1
+            c1_entry.last_ts = sim_t
 
-            if c1_entry.status == "PENDING":
-                self.cache1_dedup_hits += 1
-                should_dispatch = False
-            elif c1_entry.alert_count >= cfg.cache1_trigger_count:
-                c1_entry.status = "PENDING"
-                should_dispatch = True
-            else:
-                should_dispatch = False
+        if c1_entry.status == "PENDING":
+            self.cache1_dedup_hits += 1
+            should_dispatch = False
+        elif c1_entry.alert_count >= cfg.cache1_trigger_count:
+            c1_entry.status = "PENDING"
+            should_dispatch = True
+        else:
+            should_dispatch = False
 
-            if len(self.cache1_suspects) > self.peak_cache1_entries:
-                self.peak_cache1_entries = len(self.cache1_suspects)
-            if len(self.cache2_validated) > self.peak_cache2_entries:
-                self.peak_cache2_entries = len(self.cache2_validated)
+        if len(self.cache1_suspects) > self.peak_cache1_entries:
+            self.peak_cache1_entries = len(self.cache1_suspects)
+        if len(self.cache2_validated) > self.peak_cache2_entries:
+            self.peak_cache2_entries = len(self.cache2_validated)
 
         if should_dispatch:
             ready_ts = sim_t + cfg.stage2_sim_latency_sec
             done_evt = threading.Event()
-            self._in_flight_stage2.append((key, ready_ts, done_evt))
-            self._q_s2_in.put((key, frame_idx, ready_ts, cfg.cache2_ttl_sec, done_evt))
+            result_holder: List[Optional[Cache2Entry]] = [None]
+            heapq.heappush(
+                self._in_flight_stage2,
+                (ready_ts, self._s2_seq, key, done_evt, result_holder),
+            )
+            self._s2_seq += 1
+            self._q_s2_in.put(
+                (frame_idx, ready_ts, cfg.cache2_ttl_sec, done_evt, result_holder)
+            )
             self.stage2_dispatches += 1
 
         return 1

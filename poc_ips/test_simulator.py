@@ -137,6 +137,57 @@ class TestSimulatorAndIntegrity(unittest.TestCase):
         self.assertEqual(row["stream_fp_rescued_retrans"], 1)
         self.assertEqual(row["bus_off_events"], 0)
 
+    def test_stage2_wall_clock_completion_cannot_bypass_available_ts(self) -> None:
+        """Even if Stage-2 OS thread completes immediately, result must stay hidden before available_ts."""
+        stream = _make_stream([(0.000000, 0x100, 10, 0)])
+        cfg = poc_simulator.SimulationConfig(
+            name="FuturePublishCheck",
+            use_stage2=True,
+            use_caches=True,
+            cache1_trigger_count=1,
+            cache2_ttl_sec=0.100,
+            stage2_sim_latency_sec=0.000400,
+            retransmit_slot_sec=0.000260,
+            passive_suspend_sec=0.000016,
+            bus_off_recovery_sec=0.050,
+        )
+        engine = poc_simulator.ThreeThreadIPSEngine(
+            cfg,
+            stream,
+            fast_s1=_StubStage1({10}),  # type: ignore[arg-type]
+            fast_s2=_StubStage2(allow_all=True),  # type: ignore[arg-type]
+        )
+        try:
+            key = stream.packed_keys[0]
+            # First arrival at 0 us: Stage-1 blocks, dispatches Stage-2 with available_ts = 400 us
+            self.assertEqual(engine.process_frame(0, 0.000000, key), 1)
+            self.assertEqual(len(engine._in_flight_stage2), 1)
+
+            # Force wall-clock completion of Stage-2 worker thread BEFORE sim_t advances
+            done_evt = engine._in_flight_stage2[0][3]
+            self.assertTrue(done_evt.wait(timeout=2.0))
+
+            # At 260 us and 399 us, worker thread is already done on CPU, yet result MUST be invisible
+            self.assertNotIn(key, engine.cache2_validated)
+            self.assertEqual(engine.process_frame(0, 0.000260, key), 1)
+            self.assertEqual(engine.cache2_hits, 0)
+            self.assertEqual(engine.cache1_dedup_hits, 1)
+            self.assertEqual(engine.cache1_suspects[key].status, "PENDING")
+
+            self.assertEqual(engine.process_frame(0, 0.000399, key), 1)
+            self.assertEqual(engine.cache2_hits, 0)
+            self.assertEqual(engine.cache1_dedup_hits, 2)
+            self.assertNotIn(key, engine.cache2_validated)
+
+            # Once logical clock reaches available_ts = 400 us, Coordinator commits and hits Cache 2
+            self.assertEqual(engine.process_frame(0, 0.000400, key), 0)
+            self.assertIn(key, engine.cache2_validated)
+            self.assertEqual(engine.cache1_suspects[key].status, "VALIDATED")
+            self.assertEqual(engine.cache2_hits, 1)
+            self.assertEqual(engine.stage2_dispatches, 1)
+        finally:
+            engine.shutdown()
+
     def test_error_passive_suspend_transmission_and_bus_off_flush(self) -> None:
         """Verify 16 us Suspend Transmission after TEC > 127 and epoch flush on Bus-Off."""
         # Single blocked frame on baseline 5F runs 32 aborts to Bus-Off:
@@ -290,6 +341,15 @@ class TestSimulatorAndIntegrity(unittest.TestCase):
                 bad_meta = dict(exp_meta, cv_folds=5)
                 with self.assertRaises(RuntimeError):
                     run_experiments.CheckpointManager(cv_csv, te_csv, resume=True, expected_metadata=bad_meta)
+
+                # Missing dataset in dataset_fingerprints must raise RuntimeError under strict_checkpoint=True
+                with open(cm.meta_path, "r", encoding="utf-8") as mf:
+                    saved_meta = json.load(mf)
+                saved_meta["dataset_fingerprints"] = {}
+                with open(cm.meta_path, "w", encoding="utf-8") as mf:
+                    json.dump(saved_meta, mf)
+                with self.assertRaises(RuntimeError):
+                    run_experiments.CheckpointManager(cv_csv, te_csv, resume=True, expected_metadata=exp_meta)
 
                 # Legacy CSV without checkpoint_meta.json must fail unless allow_legacy_checkpoint=True
                 os.remove(cm.meta_path)
