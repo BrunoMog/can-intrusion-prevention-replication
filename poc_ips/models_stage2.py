@@ -70,11 +70,21 @@ def build_global_9f_matrix(can_ids: Iterable[Any], x_8b: np.ndarray) -> np.ndarr
     return np.hstack([id_norm, np.asarray(x_8b, dtype=np.float64)])
 
 
+def _canonicalize_can_id_str(val: Any) -> str:
+    """Canonicalize an 11-bit CAN ID representation to lowercase 4-hex ('0316')."""
+    if isinstance(val, (int, np.integer)):
+        return f"{int(val):04x}"
+    s = str(val).strip().lower()
+    if s.startswith("0x"):
+        s = s[2:]
+    return s.zfill(4)
+
+
 def normalize_can_id_strs(can_ids: Iterable[Any]) -> np.ndarray:
-    """Canonicalize CAN IDs as lowercase strings for O(1) dict routing."""
-    arr = np.asarray(can_ids)
+    """Canonicalize CAN IDs as lowercase 4-hex strings for O(1) dict routing."""
+    arr = np.asarray(list(can_ids) if not isinstance(can_ids, (np.ndarray, pd.Series)) else can_ids)
     uniq = pd.unique(arr)
-    mapping = {v: str(v).strip().lower() for v in uniq}
+    mapping = {v: _canonicalize_can_id_str(v) for v in uniq}
     return np.fromiter((mapping[v] for v in arr), dtype=object, count=len(arr))
 
 
@@ -351,7 +361,7 @@ class Stage2IsolationForest:
         if self.global_9f_ is None:
             raise RuntimeError("Model must be fit before calling predict_one.")
 
-        cid = str(can_id_str).strip().lower()
+        cid = _canonicalize_can_id_str(can_id_str)
         x_row = np.asarray(x_8b_row, dtype=np.float64).reshape(1, 8)
 
         if self.arch == "iForest_9F_Global":

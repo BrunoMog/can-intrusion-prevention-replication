@@ -14,9 +14,29 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from sklearn.ensemble import IsolationForest
-from sklearn.ensemble._iforest import _average_path_length
 
 from models_stage2 import CAN_ID_MAX_VALUE, Stage2IsolationForest
+
+
+def average_path_length(n_samples_leaf: Any) -> np.ndarray:
+    """Average path length c(n) of unsuccessful BST search (Liu et al., 2008).
+
+    Matches scikit-learn's Isolation Forest normalization without depending on
+    private internal API symbols.
+    """
+    arr = np.asarray(n_samples_leaf, dtype=np.float64)
+    shape = arr.shape
+    flat = np.atleast_1d(arr).astype(np.float64, copy=False)
+    out = np.zeros(flat.shape, dtype=np.float64)
+
+    mask_2 = flat == 2.0
+    mask_gt2 = flat > 2.0
+    out[mask_2] = 1.0
+    out[mask_gt2] = (
+        2.0 * (np.log(flat[mask_gt2] - 1.0) + np.euler_gamma)
+        - 2.0 * (flat[mask_gt2] - 1.0) / flat[mask_gt2]
+    )
+    return out.reshape(shape)
 
 _POC_DIR = os.path.dirname(os.path.abspath(__file__))
 _C_SRC = os.path.join(_POC_DIR, "fast_iforest.c")
@@ -108,7 +128,7 @@ class FastIsolationForest:
             remapped_f = np.where(raw_f >= 0, f_map[np.maximum(raw_f, 0)], -2).astype(np.int32)
 
             node_depths = _compute_node_depths(raw_cl, raw_cr).astype(np.float64)
-            c_leaf = _average_path_length(tree.n_node_samples).astype(np.float64)
+            c_leaf = average_path_length(tree.n_node_samples).astype(np.float64)
 
             cl = np.where(raw_cl != -1, raw_cl + cursor, -1).astype(np.int32)
             cr = np.where(raw_cr != -1, raw_cr + cursor, -1).astype(np.int32)
@@ -127,7 +147,7 @@ class FastIsolationForest:
         self._thresh = np.ascontiguousarray(np.concatenate(threshs), dtype=np.float64)
         self._leaf_depth = np.ascontiguousarray(np.concatenate(leaf_depths), dtype=np.float64)
 
-        c_max = float(_average_path_length(np.array([clf.max_samples_]))[0])
+        c_max = float(average_path_length(np.array([clf.max_samples_]))[0])
         self._handle = self._lib.iforest_create(
             ctypes.c_int32(len(offsets)),
             self._tree_offsets.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
