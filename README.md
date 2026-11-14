@@ -39,9 +39,9 @@ Projeto desenvolvido para a disciplina **CIN0114 — Técnicas de Ataque e Detec
 O barramento **CAN (Controller Area Network)** é o padrão dominante para comunicação entre Unidades de Controle Eletrônico (ECUs) automotivas, mas carece nativamente de autenticação, criptografia e controle de acesso.
 
 Este projeto realiza três frentes principais:
-1. **Replicação Integral do Artigo Base**: Avaliação cruzada de 10 *folds* dos 16 modelos não supervisionados ($\text{OCSVM\_1F}\dots\text{8F}$ e $\text{iForest\_1F}\dots\text{8F}$) nos ataques *Fuzzing*, *Drive Gear Spoofing* e *RPM Gauge Spoofing* do *Car-Hacking Dataset*, com validação estatística via D'Agostino-Pearson, One-Way ANOVA e Tukey HSD.
+1. **Replicação Metodológica (`DLC = 8`) do Artigo Base**: Avaliação cruzada de 10 *folds* dos 16 modelos não supervisionados ($\text{OCSVM\_1F}\dots\text{8F}$ e $\text{iForest\_1F}\dots\text{8F}$) nos ataques *Fuzzing*, *Drive Gear Spoofing* e *RPM Gauge Spoofing* do *Car-Hacking Dataset*, com validação estatística via D'Agostino-Pearson, One-Way ANOVA, Tukey HSD e teste pareado TOST ($\Delta = \pm 1{,}00\%$ p.p.).
 2. **Generalização em Segundo Dataset Independente**: Avaliação completa do protocolo (com particionamento proporcional em 10 *folds* sem vazamento de dados) no cenário físico *Prototype Speedometer Spoofing*.
-3. **Proposta de Melhoria e Prova de Conceito (`poc_ips/`)**: Arquitetura IPS assíncrona em **dois estágios** ($\text{iForest\_5F} \rightarrow \text{CAN\_ID} + 8\text{ bytes}$, exclusivamente com *Isolation Forest*) executada em **três *threads*** com memória compartilhada, sistema **Dual-Cache** com expiração anti-*replay* ($\text{TTL} = 100\text{ ms}$) e avaliação em simulador cronológico de confinamento de erros CAN 2.0A (`TEC += 8`, `Error Warning >= 96`, `Error Passive > 127`, `Bus-Off > 255`).
+3. **Proposta de Melhoria e Prova de Conceito (`poc_ips/`)**: Arquitetura IPS assíncrona em **dois estágios** ($\text{iForest\_5F} \rightarrow \text{CAN\_ID} + 8\text{ bytes}$, exclusivamente com *Isolation Forest*) executada em **três *threads*** com memória compartilhada (motor em C validado por suíte executável de equivalência contra o `scikit-learn`), sistema **Dual-Cache** com expiração temporal limitada ($\text{TTL} = 100\text{ ms}$) e avaliação em modelo simplificado orientado a traços por `CAN_ID` de confinamento de erros CAN 2.0A (`TEC += 8`, `Error Warning >= 96`, `Error Passive > 127`, `Bus-Off > 255`), incluindo análise de sensibilidade paramétrica.
 
 ---
 
@@ -53,7 +53,9 @@ projeto_CIN0114/
 │   └── .gitkeep
 ├── splits_cache/                             # Índices determinísticos (.npz) de folds/teste (ignorado)
 │   └── .gitkeep
-├── results/                                  # CSVs e gráficos dos experimentos base (ignorado)
+├── results/                                  # CSVs dos experimentos base (versionados no repo)
+│   ├── cv_grid_search_results.csv
+│   ├── final_test_results.csv
 │   └── .gitkeep
 ├── models/                                   # Modelos base serializados (.joblib) (ignorado)
 │   └── .gitkeep
@@ -61,17 +63,22 @@ projeto_CIN0114/
 │   └── .gitkeep
 ├── poc_ips/                                  # Prova de Conceito: IPS 2 Estágios + Dual-Cache (3 threads)
 │   ├── fast_iforest.c                        # Motor nativo em C para inferência por quadro único
-│   ├── fast_iforest.py                       # Wrapper ctypes + validação exata contra scikit-learn
+│   ├── fast_iforest.py                       # Wrapper ctypes (sem APIs privadas) + Liu et al. c(n)
+│   ├── test_equivalence.py                   # Testes unitários e de equivalência C vs scikit-learn
 │   ├── models_stage2.py                      # Modelos Estágio 2 (9F Global e Híbridos por CAN ID)
 │   ├── train_stage2.py                       # Treinamento/seleção 10-Fold CV e avaliação em cascata
-│   ├── poc_simulator.py                      # Motor 3-threads Dual-Cache + simulador CAN 2.0A (TEC/Bus-Off)
+│   ├── poc_simulator.py                      # Motor 3-threads Dual-Cache + modelo CAN 2.0A por CAN ID + --sensitivity
 │   ├── models/                               # Modelos Estágio 1/2 persistidos (.joblib, ignorado)
 │   │   └── .gitkeep
-│   └── results/                              # CSVs e figuras da PoC (ignorado)
+│   └── results/                              # CSVs da PoC (versionados) e figuras (ignoradas)
+│       ├── stage2_cv_results.csv
+│       ├── stage2_test_comparison.csv
+│       ├── poc_simulation_results.csv
+│       ├── poc_sensitivity_results.csv
 │       └── .gitkeep
 ├── relatorio/                                # Relatório técnico em formato IEEEtran (LaTeX + PDF)
 │   ├── relatorio_can_ips.tex                 # Código-fonte LaTeX principal
-│   ├── relatorio_can_ips.pdf                 # Relatório compilado final (13 páginas)
+│   ├── relatorio_can_ips.pdf                 # Relatório compilado final (14 páginas)
 │   ├── IEEEtran.cls                          # Classe IEEEtran Conference
 │   ├── fig_eda_signatures.png                # Fig. 1: Assinaturas de bytes e PCA (EDA)
 │   ├── fig_bytes_progression.png             # Fig. 2: Evolução da acurácia por N bytes (Fuzzing)
@@ -81,12 +88,13 @@ projeto_CIN0114/
 │   └── fig_poc_comparison.png                # Fig. 6: Impacto sistêmico no simulador CAN 2.0A
 ├── An_Efficient_Intrusion_Prevention_System_for_CAN_Hindering_Cyber-Attacks_With_a_Low-Cost_Platform.pdf
 ├── config.py                                 # Presets de grades (smoke, default, refined, fast_refined, full)
-├── utils.py                                  # Parsing DLC=8, conversão Prototype->CSV e splits isolados
+├── utils.py                                  # Parsing DLC=8, conversão Prototype->CSV, fingerprint e splits isolados
 ├── run_experiments.py                        # Pipeline principal de CV 10-fold, Grid Search e Teste
-├── post_analysis.py                          # Testes D'Agostino-Pearson, ANOVA, Tukey HSD, SOTA e Fig. 5
+├── post_analysis.py                          # Testes D'Agostino-Pearson, ANOVA, Tukey HSD, TOST, SOTA e Fig. 5
 ├── build_notebook.py                         # Gerador programático do notebook de EDA
 ├── EDA_CAN_Intrusion_Datasets.ipynb          # Notebook de EDA (zero test leakage)
-├── requirements.txt                          # Dependências Python do projeto
+├── requirements.txt                          # Dependências mínimas Python
+├── requirements-lock.txt                     # Versões exatas fixadas no ambiente testado (Python 3.14.10)
 ├── .gitignore                                # Regras de arquivos ignorados
 └── README.md                                 # Documentação do repositório
 ```
@@ -97,7 +105,7 @@ projeto_CIN0114/
 
 ### Requisitos
 * **Sistema Operacional**: Linux (testado em ambiente local)
-* **Python**: `>= 3.10`
+* **Python**: `>= 3.10` (ambiente de referência fixado em `Python 3.14.10` via [`requirements-lock.txt`](requirements-lock.txt))
 * **Compilador C (`gcc`)**: necessário apenas para compilar sob demanda o módulo nativo `poc_ips/fast_iforest.c` (`_fast_iforest_c.so`) usado na simulação PoC
 * **LaTeX (`latexmk` + `pdflatex`)**: opcional, para recompilar o relatório em `relatorio/`
 
@@ -107,7 +115,7 @@ projeto_CIN0114/
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r requirements-lock.txt   # ou: pip install -r requirements.txt
 ```
 
 Para executar o notebook no Jupyter com o mesmo ambiente:
@@ -120,9 +128,18 @@ python -m ipykernel install --user --name=cin0114 --display-name="Python (CIN011
 
 ## 4. Datasets e Isolamento Metodológico
 
-Os experimentos empregam quatro conjuntos de dados com mensagens filtradas em `DLC = 8`:
-1. **Car-Hacking Dataset (HCRL)**: [Link oficial](https://ocslab.hksecurity.net/Datasets/car-hacking-dataset) — coloque em `datasets/` os arquivos `Fuzzy_dataset.csv`, `gear_dataset.csv` e `RPM_dataset.csv` (opcionalmente `DoS_dataset.csv`).
-2. **Prototype Speedometer Spoofing (2º dataset)**: arquivo bruto `datasets/data/Prototype/spoofing_speedometer.log` em formato `candump`, convertido para `datasets/Speedometer_dataset.csv` pela função `utils.convert_prototype_speedometer_log_to_csv()`.
+Os experimentos empregam quatro conjuntos de dados públicos com mensagens filtradas em `DLC = 8`:
+
+1. **Car-Hacking Dataset (HCRL)** — Conjunto original avaliado pelo artigo base:
+   * **Link oficial**: <https://ocslab.hksecurity.net/Datasets/car-hacking-dataset>
+   * **Uso local**: alocar em `datasets/` os arquivos `Fuzzy_dataset.csv`, `gear_dataset.csv` e `RPM_dataset.csv` (opcionalmente `DoS_dataset.csv`).
+2. **Automotive CAN Bus Intrusion Dataset — Prototype (`spoofing_speedometer.log`)** — Segundo conjunto independente para avaliação de generalização:
+   * **Link oficial (4TU.ResearchData)**: <https://data.4tu.nl/articles/_/12696950/2>
+   * **DOI**: [`10.4121/uuid:b74b4928-c377-4585-9432-2004dfa20a5d`](https://doi.org/10.4121/uuid:b74b4928-c377-4585-9432-2004dfa20a5d)
+   * **Descrição**: Captura real em barramento CAN de dois veículos (*Opel Astra* e *Renault Clio*) e de uma bancada física (*Prototype*), contendo dados normais e ataques de *Diagnostic*, *Fuzzing*, *Replay*, *Suspension*, *DoS* e *Speedometer Spoofing*.
+   * **Uso local**: extrair para `datasets/data/` (garantindo `datasets/data/Prototype/spoofing_speedometer.log`) e executar `utils.convert_prototype_speedometer_log_to_csv()` para gerar `datasets/Speedometer_dataset.csv`.
+
+> Os CSVs de resultados gerados pela replicação ([`results/`](results/)) e pela Prova de Conceito ([`poc_ips/results/`](poc_ips/results/)) encontram-se versionados no repositório para consulta e reprodutibilidade direta dos resultados numéricos.
 
 ### Particionamento (`seed = 42`, zero *test leakage*)
 
@@ -168,7 +185,7 @@ O pipeline utiliza leitura em *streaming*, fatoração exata de limiares na vali
 python post_analysis.py --fig5_dataset Fuzzing
 ```
 
-Executa o teste de normalidade de D'Agostino-Pearson, One-Way ANOVA, teste *post-hoc* de Tukey HSD ($N$ mínimo equivalente ao modelo completo de 8 bytes), compara os resultados com o estado da arte (**GIDS** — Seo *et al.*, **DCNN** e **LSTM-IDS** — Song *et al.*, **MTH-IDS** — Yang *et al.*) e gera `results/figure5_confusion_matrices.png`.
+Executa os testes D'Agostino-Pearson, One-Way ANOVA, *post-hoc* de Tukey HSD e equivalência pareada TOST ($\Delta = \pm 1{,}00\%$ p.p. vs `iForest_8F`), compara os resultados com métricas reportadas da literatura (**GIDS** — Seo *et al.*, **DCNN** e **LSTM-IDS** — Song *et al.*, **MTH-IDS** — Yang *et al.*) e gera `results/figure5_confusion_matrices.png`.
 
 ---
 
@@ -178,7 +195,7 @@ Para atacar os falsos positivos do modelo $\text{iForest\_5F}$ e evitar o bloque
 
 * **Estágio 1 (`Worker_Stage1`)**: modelo $\text{iForest\_5F}$ pré-carregado atuando de forma síncrona no 5º byte ($D_0 \dots D_4$).
 * **Estágio 2 Assíncrono (`Worker_Stage2`)**: modelo exclusivo de *Isolation Forest* com `CAN_ID` normalizado + $8$ bytes ($D_0 \dots D_7$), avaliando variantes globais (`iForest_9F_Global`) e híbridas condicionadas por identificador (`iForest_Hybrid_Fallback`, `iForest_Hybrid_StrictUnknown`).
-* **Coordenador com Dual-Cache (`Coordinator`)**: chave compacta de 75 bits `(CAN_ID << 64) | payload_64`, **Cache 1** para rastreamento/deduplicação de alertas suspeitos ($k_{\text{trig}}$ configurável) e **Cache 2** com $\text{TTL} = 100\text{ ms}$ anti-*replay* para respostas em $\mathcal{O}(1)$ antes de nova penalização do `TEC`.
+* **Coordenador com Dual-Cache (`Coordinator`)**: chave compacta de 75 bits `(CAN_ID << 64) | payload_64`, **Cache 1** para rastreamento/deduplicação de alertas suspeitos ($k_{\text{trig}}$ configurável) e **Cache 2** com expiração temporal limitada ($\text{TTL} = 100\text{ ms}$, invalidação *lazy* + varredura periódica a cada 50 mil quadros) para respostas em $\mathcal{O}(1)$ antes de nova penalização do `TEC` (não provê proteção *anti-replay*).
 
 ### Comandos da PoC
 
@@ -186,8 +203,14 @@ Para atacar os falsos positivos do modelo $\text{iForest\_5F}$ e evitar o bloque
 # Etapa 1: Seleção 10-Fold CV e persistência dos modelos Estágio 1 e Estágio 2 (requer results/final_test_results.csv)
 python poc_ips/train_stage2.py --datasets Speedometer Fuzzing "Drive Gear" "RPM Gauge"
 
-# Etapas 2–4: Simulação PoC em 3 threads + confinamento de erros CAN 2.0A + ablações e figuras
+# Verificação de equivalência numérica e decisória do motor nativo em C vs scikit-learn
+python poc_ips/test_equivalence.py
+
+# Etapas 2–4: Simulação PoC em 3 threads + modelo CAN 2.0A por CAN ID + ablações e figuras
 python poc_ips/poc_simulator.py --datasets Speedometer Fuzzing "Drive Gear" "RPM Gauge"
+
+# Análise de sensibilidade paramétrica (latência Estágio 2, recuperação Bus-Off e TTL da Cache 2)
+python poc_ips/poc_simulator.py --sensitivity --datasets Speedometer "Drive Gear" Fuzzing
 ```
 
 ---

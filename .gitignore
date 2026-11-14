@@ -23,12 +23,15 @@ splits_cache/*
 *.npy
 
 # Resultados Experimentais, Modelos Serializados e Logs
+# Mantém os CSVs de resultados (~2,2 MB ao todo) disponíveis no repositório para reprodutibilidade
 results/*
 !results/.gitkeep
+!results/*.csv
 models/*
 !models/.gitkeep
 poc_ips/results/*
 !poc_ips/results/.gitkeep
+!poc_ips/results/*.csv
 poc_ips/models/*
 !poc_ips/models/.gitkeep
 logs/*
@@ -112,3 +115,6 @@ test
 *.synctex.gz
 *.toc
 *.vrb
+
+# notas
+notes.txt
