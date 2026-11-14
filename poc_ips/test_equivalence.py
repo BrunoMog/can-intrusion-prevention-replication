@@ -197,9 +197,11 @@ class TestFastIsolationForestEquivalence(unittest.TestCase):
                 self.assertEqual(c_pred_u, 1)
                 self.assertGreater(c_score_u, 0.0)
 
-    def test_persisted_poc_models_equivalence_on_real_traces(self) -> None:
+    def test_persisted_poc_models_synthetic_probe(self) -> None:
+        """Verify persisted .joblib Stage-1/Stage-2 artifacts against C on synthetic probes."""
         models_dir = os.path.join(POC_DIR, "models")
-        summaries: List[Tuple[str, int, float, int, float, int, float]] = []
+        tested = 0
+        rng = np.random.default_rng(2025)
 
         for ds_name in config.ALL_DATASETS:
             s1_path, s2_path = get_model_artifact_paths(models_dir, ds_name)
@@ -211,25 +213,70 @@ class TestFastIsolationForestEquivalence(unittest.TestCase):
             fast_s1 = FastIsolationForest(s1_clf)
             fast_s2 = FastStage2Evaluator(s2_model)
 
-            # Evaluate a bounded chronological slice on real test data when available
+            x8 = np.ascontiguousarray(
+                np.vstack([rng.uniform(0.0, 1.0, size=(300, 8)), np.zeros((2, 8)), np.ones((2, 8))]),
+                dtype=np.float32,
+            )
+            x5 = np.ascontiguousarray(x8[:, :5], dtype=np.float32)
+            known_ids = list(getattr(s2_model, "local_models", {}).keys())[:4] or ["0316"]
+            cids_str = np.array([known_ids[i % len(known_ids)] for i in range(len(x8))])
+            cids_str[-2:] = "07FE"
+            cids_int = parse_can_ids_to_int(cids_str)
+
+            sk1_scores = s1_clf.decision_function(x5)
+            sk1_preds = np.where(s1_clf.predict(x5) == -1, 1, 0)
+            sk2_preds, sk2_scores = s2_model.predict(cids_str, x8)
+
+            for i in range(len(x8)):
+                cs1 = fast_s1.decision_one_f32(x5[i])
+                cp1 = fast_s1.predict_one_f32(x5[i])
+                cp2, cs2 = fast_s2.predict_one(int(cids_int[i]), x8[i])
+                self.assertEqual(cp1, int(sk1_preds[i]), f"Synthetic Stage-1 mismatch on {ds_name}")
+                self.assertEqual(cp2, int(sk2_preds[i]), f"Synthetic Stage-2 mismatch on {ds_name}")
+                self.assertLess(abs(cs1 - float(sk1_scores[i])), 1e-11)
+                self.assertLess(abs(cs2 - float(sk2_scores[i])), 1e-11)
+            tested += 1
+
+        if tested == 0:
+            self.skipTest("No persisted Stage-1/Stage-2 .joblib models present in poc_ips/models/.")
+
+    def test_persisted_poc_models_equivalence_on_real_traces(self) -> None:
+        """Integration test: verify persisted C vs sklearn parity strictly on real trace splits."""
+        models_dir = os.path.join(POC_DIR, "models")
+        max_scan_env = os.environ.get("CAN_IPS_EQUIV_MAX_SCAN", "15000")
+        max_scan = int(max_scan_env)
+        summaries: List[Tuple[str, int, int, float, int, float, int, float]] = []
+
+        for ds_name in config.ALL_DATASETS:
+            s1_path, s2_path = get_model_artifact_paths(models_dir, ds_name)
+            if not (os.path.exists(s1_path) and os.path.exists(s2_path)):
+                continue
+
             ds_file = utils.DATASET_PATHS.get(ds_name, "")
-            if ds_file and os.path.exists(ds_file):
-                df = utils.load_test_data(ds_name, add_normalized_cols=True)
-                # Scan up to 15,000 evenly sampled frames to mine near-boundary samples cleanly
-                scan_step = max(1, len(df) // 15000)
+            has_real_trace = bool(ds_file and os.path.exists(ds_file))
+            if not has_real_trace and ds_name == "Speedometer":
+                raw_log = utils.RAW_LOG_PATHS.get("Speedometer", "")
+                has_real_trace = bool(raw_log and os.path.exists(raw_log))
+            if not has_real_trace:
+                # Never fabricate random data under a real-trace integration test
+                continue
+
+            s1_clf = joblib.load(s1_path)
+            s2_model = joblib.load(s2_path)
+            fast_s1 = FastIsolationForest(s1_clf)
+            fast_s2 = FastStage2Evaluator(s2_model)
+
+            df = utils.load_test_data(ds_name, add_normalized_cols=True)
+            if max_scan > 0 and len(df) > max_scan:
+                scan_step = max(1, len(df) // max_scan)
                 df_scan = df.iloc[::scan_step].reset_index(drop=True)
-                x8 = np.ascontiguousarray(df_scan[utils.NORM_BYTE_COLS].to_numpy(dtype=np.float32))
-                x5 = np.ascontiguousarray(x8[:, :5], dtype=np.float32)
-                cids_str = df_scan["CAN_ID"].to_numpy()
-                cids_int = parse_can_ids_to_int(cids_str)
-                labels = df_scan["Label"].to_numpy(dtype=np.int64)
             else:
-                rng = np.random.default_rng(42)
-                x8 = np.ascontiguousarray(rng.uniform(0.0, 1.0, size=(2000, 8)), dtype=np.float32)
-                x5 = np.ascontiguousarray(x8[:, :5], dtype=np.float32)
-                cids_str = np.array(["0316"] * len(x8))
-                cids_int = parse_can_ids_to_int(cids_str)
-                labels = np.zeros(len(x8), dtype=np.int64)
+                df_scan = df
+            x8 = np.ascontiguousarray(df_scan[utils.NORM_BYTE_COLS].to_numpy(dtype=np.float32))
+            x5 = np.ascontiguousarray(x8[:, :5], dtype=np.float32)
+            cids_str = df_scan["CAN_ID"].to_numpy()
+            cids_int = parse_can_ids_to_int(cids_str)
+            labels = df_scan["Label"].to_numpy(dtype=np.int64)
 
             sk1_scores_all = s1_clf.decision_function(x5)
             idx1 = _select_eval_indices(sk1_scores_all, labels)
@@ -258,9 +305,8 @@ class TestFastIsolationForestEquivalence(unittest.TestCase):
                 if cp2 != int(sk2_preds_all[i]):
                     s2_mismatches += 1
 
-            # Also verify float32 -> CAN_ID_norm roundtrip stays strictly within bound
             summaries.append(
-                (ds_name, len(idx1), max_s1_err, s1_mismatches, max_s2_err, s2_mismatches, min(min_s1_margin, min_s2_margin))
+                (ds_name, len(df_scan), len(idx1), max_s1_err, s1_mismatches, max_s2_err, s2_mismatches, min(min_s1_margin, min_s2_margin))
             )
 
             self.assertEqual(s1_mismatches, 0, f"Stage-1 prediction mismatch on {ds_name}")
@@ -268,11 +314,13 @@ class TestFastIsolationForestEquivalence(unittest.TestCase):
             self.assertLess(max_s1_err, 1e-11, f"Stage-1 score drift {max_s1_err} on {ds_name}")
             self.assertLess(max_s2_err, 1e-11, f"Stage-2 score drift {max_s2_err} on {ds_name}")
 
-        self.assertGreater(len(summaries), 0, "Expected at least one persisted model pair in poc_ips/models/")
-        print("\n=== Native C vs scikit-learn Equivalence Verification Summary ===")
-        for ds_name, n_eval, e1, m1, e2, m2, min_m in summaries:
+        if not summaries:
+            self.skipTest("Skipped real-trace parity integration test: no local datasets + .joblib pairs available.")
+
+        print("\n=== Native C vs scikit-learn Real-Trace Equivalence Summary ===")
+        for ds_name, n_scan, n_eval, e1, m1, e2, m2, min_m in summaries:
             print(
-                f"  [{ds_name:<12}] evaluated={n_eval:>4} (min |margin|={min_m:.3e}) | "
+                f"  [{ds_name:<12}] scanned={n_scan:>5} evaluated={n_eval:>4} (min |margin|={min_m:.3e}) | "
                 f"Stage1 max|d|={e1:.3e} mismatches={m1} | "
                 f"Stage2 max|d|={e2:.3e} mismatches={m2}"
             )

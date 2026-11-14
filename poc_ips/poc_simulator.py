@@ -7,24 +7,36 @@ Executes genuine 3-thread shared-memory inference:
   - Worker_Stage1 Thread: pre-loaded C-accelerated `iForest_5F` evaluator.
   - Worker_Stage2 Thread: pre-loaded asynchronous C-accelerated `CAN_ID + 8B` evaluator.
 
-Couples the 3-thread IPS to a simplified trace-driven CAN 2.0A Error-Confinement
-event model (chronological log playback without global bus rescheduling):
-  - Legitimate frames blocked by IPS trigger Active Error Flags (`TEC += 8`) and
-    modeled ECU retransmission (`retransmit_slot_sec = 260 us` at 500 kbps).
-  - Successful legitimate transmissions decrement `TEC -= 1` (if `TEC > 0`).
+Couples the 3-thread IPS to a chronological global-event-queue (`heapq`)
+CAN 2.0A Error-Confinement model over logged traffic:
+  - Assumed Physical IPS Architecture: inline physical-bus active IPS (Araujo-Filho
+    et al., IEEE Access 2021) that injects an `Active Error Flag` onto the bus at
+    byte 5 when blocking a frame. Because the error flag occurs physically on the
+    wire during ongoing transmission, the transmitting ECU detects a bit/stuffing
+    violation and increments `TEC += 8` across both `Error Active` and
+    `Error Passive` states (Bosch CAN 2.0A Section 7.2). Note: this bus-error
+    confinement model does NOT apply to a purely software gateway dropping frames
+    silently post-reception.
+  - Chronological Global Event Scheduler (`heapq`): original trace arrivals and
+    scheduled retransmissions advance monotonically in global `sim_t` order so
+    Stage-2 async completion barriers and TEC/cache states never reflect future events.
+    Remaining simplification: full CAN arbitration / priority contention delays across
+    distinct IDs on the wire are not rescheduled.
+  - Error Passive (`TEC > 127`) & Suspend Transmission: while `in_passive` is True,
+    modeled retransmissions add Bosch's 8-bit `Suspend Transmission` penalty
+    (`passive_suspend_sec = 16 us` at 500 kbps) to `retransmit_slot_sec` (`260 us`).
   - Tracks one TEC state machine per `CAN_ID` as an ECU proxy (raw traces do
-    not include a DBC ECU-to-CAN_ID mapping matrix).
-  - Tracks `Error Warning (>= 96)`, `Error Passive (> 127)`, `Bus-Off (> 255)`
-    events, parameterized ECU Bus-Off recovery windows (50 ms default vs. Bosch
-    CAN 2.0A hardware minimum of 128 x 11 recessive bits ~2.8 ms at 500 kbps),
-    dropped telemetry during outages, attack Recall (TP/FN), and Cache 1/Cache 2
-    hit and memory statistics (lazy per-access TTL eviction + periodic sweep).
+    not include a DBC ECU-to-CAN_ID mapping matrix), plus `Error Warning (>= 96)`,
+    `Error Passive (> 127)`, `Bus-Off (> 255)` (flushing queued pending TX for the
+    offending ECU), parameterized recovery cooldowns (50 ms nominal vs. CAN 2.0A
+    minimum ~2.8 ms), dropped outages, attack Recall, and Cache 1/Cache 2 telemetry.
 """
 
 from __future__ import annotations
 
 import argparse
 import gc
+import heapq
 import math
 import os
 import queue
@@ -72,6 +84,7 @@ class SimulationConfig:
     cache2_ttl_sec: Optional[float] = 0.100  # 100 ms short validation window
     stage2_sim_latency_sec: float = 0.000200  # 200 us post-8B async completion budget
     retransmit_slot_sec: float = 0.000260  # 260 us CAN 2.0A slot at 500 kbps
+    passive_suspend_sec: float = 0.000016  # 8 recessive bits Suspend Transmission (Error Passive)
     bus_off_recovery_sec: float = 0.050  # 50 ms ECU recovery cooldown after Bus-Off
 
 
@@ -190,6 +203,7 @@ class EcuErrorState:
     in_warning: bool = False
     in_passive: bool = False
     bus_off_until: float = -1.0
+    bus_off_epoch: int = 0
     warning_events: int = 0
     passive_events: int = 0
     bus_off_events: int = 0
@@ -469,6 +483,7 @@ def _record_ecu_abort_error(
 
     if ecu.tec > 255:
         ecu.bus_off_events += 1
+        ecu.bus_off_epoch += 1
         ecu.bus_off_until = sim_t + bus_off_recovery_sec
         ecu.outage_sec += bus_off_recovery_sec
         ecu.tec = 0
@@ -494,7 +509,7 @@ def run_single_simulation(
     fast_s1: FastIsolationForest,
     fast_s2: Optional[FastStage2Evaluator],
 ) -> Dict[str, Any]:
-    """Execute one full chronological trace replay with CAN Error Confinement."""
+    """Execute one chronological global-event-queue trace replay with CAN Error Confinement."""
     engine = ThreeThreadIPSEngine(sim_cfg, stream, fast_s1, fast_s2)
 
     ecus: Dict[int, EcuErrorState] = {}
@@ -515,68 +530,105 @@ def run_single_simulation(
     attack_fn = 0
 
     retransmit_slot = sim_cfg.retransmit_slot_sec
+    passive_suspend = sim_cfg.passive_suspend_sec
     recovery_sec = sim_cfg.bus_off_recovery_sec
 
+    # Global priority queue of pending TX retransmission events:
+    # (event_ts, seq, frame_idx, attempt, expected_bus_off_epoch)
+    retransmit_heap: List[Tuple[float, int, int, int, int]] = []
+    heappush = heapq.heappush
+    heappop = heapq.heappop
+    seq = 0
+    trace_idx = 0
+    processed_events = 0
+    prev_sim_t = -math.inf
+
     t_sim_start = time.perf_counter()
-    for i in range(n_frames):
-        if i % 50000 == 0 and i > 0:
-            engine.sweep_expired(float(timestamps[i]))
+    while trace_idx < n_frames or retransmit_heap:
+        has_trace = trace_idx < n_frames
+        if retransmit_heap and (not has_trace or retransmit_heap[0][0] <= float(timestamps[trace_idx])):
+            sim_t, _, frame_idx, attempt, expected_epoch = heappop(retransmit_heap)
+            is_retransmission = True
+        else:
+            frame_idx = trace_idx
+            sim_t = float(timestamps[frame_idx])
+            trace_idx += 1
+            attempt = 0
+            expected_epoch = -1
+            is_retransmission = False
 
-        t_orig = float(timestamps[i])
-        cid = int(cids_int[i])
-        key = keys[i]
-        y_true = int(labels[i])
+        if sim_t < prev_sim_t:
+            raise AssertionError(f"Non-monotonic simulation clock: {sim_t} < {prev_sim_t}")
+        prev_sim_t = sim_t
 
-        if y_true == 1:
-            stream_attack_total += 1
-            verdict = engine.process_frame(i, t_orig, key)
-            if verdict == 1:
-                attack_tp += 1
-            else:
-                attack_fn += 1
-            continue
+        if processed_events > 0 and processed_events % 50000 == 0:
+            engine.sweep_expired(sim_t)
+        processed_events += 1
 
-        # Legitimate ECU frame (Label == 0)
-        stream_normal_total += 1
-        ecu = ecus.get(cid)
-        if ecu is None:
-            ecu = EcuErrorState()
-            ecus[cid] = ecu
+        cid = int(cids_int[frame_idx])
+        key = keys[frame_idx]
 
-        if t_orig < ecu.bus_off_until:
-            ecu.dropped_while_bus_off += 1
-            continue
-
-        attempt = 0
-        while True:
-            sim_t = t_orig + attempt * retransmit_slot
-            verdict = engine.process_frame(i, sim_t, key)
-            if verdict == 0:
-                if attempt == 0:
-                    stream_tn_first_try += 1
+        if not is_retransmission:
+            y_true = int(labels[frame_idx])
+            if y_true == 1:
+                stream_attack_total += 1
+                verdict = engine.process_frame(frame_idx, sim_t, key)
+                if verdict == 1:
+                    attack_tp += 1
                 else:
-                    stream_fp_rescued_retrans += 1
-                _record_ecu_success(ecu)
-                break
+                    attack_fn += 1
+                continue
 
-            if attempt == 0:
-                stream_fp_initial += 1
-            total_legit_aborts += 1
-            hit_bus_off = _record_ecu_abort_error(ecu, sim_t, recovery_sec)
-            if hit_bus_off:
+            # New legitimate ECU frame arrival (Label == 0)
+            stream_normal_total += 1
+            ecu = ecus.get(cid)
+            if ecu is None:
+                ecu = EcuErrorState()
+                ecus[cid] = ecu
+
+            if sim_t < ecu.bus_off_until:
+                ecu.dropped_while_bus_off += 1
+                continue
+        else:
+            # Scheduled legitimate retransmission event (attempt >= 1)
+            ecu = ecus[cid]
+            if ecu.bus_off_epoch != expected_epoch or sim_t < ecu.bus_off_until:
+                # Pending TX buffer was flushed when ECU transitioned to Bus-Off
                 stream_fp_unrescued_lost += 1
-                break
-            attempt += 1
+                continue
+
+        verdict = engine.process_frame(frame_idx, sim_t, key)
+        if verdict == 0:
+            if is_retransmission:
+                stream_fp_rescued_retrans += 1
+            else:
+                stream_tn_first_try += 1
+            _record_ecu_success(ecu)
+            continue
+
+        if not is_retransmission:
+            stream_fp_initial += 1
+        total_legit_aborts += 1
+        hit_bus_off = _record_ecu_abort_error(ecu, sim_t, recovery_sec)
+        if hit_bus_off:
+            stream_fp_unrescued_lost += 1
+        else:
+            delay = retransmit_slot + (passive_suspend if ecu.in_passive else 0.0)
+            heappush(retransmit_heap, (sim_t + delay, seq, frame_idx, attempt + 1, ecu.bus_off_epoch))
+            seq += 1
 
     wall_sec = time.perf_counter() - t_sim_start
     engine.shutdown()
+
+    dropped_during_bus_off = sum(e.dropped_while_bus_off for e in ecus.values())
+    assert stream_fp_initial == stream_fp_rescued_retrans + stream_fp_unrescued_lost
+    assert stream_normal_total == stream_tn_first_try + dropped_during_bus_off + stream_fp_initial
 
     max_tec = max((e.max_tec for e in ecus.values()), default=0)
     warning_events = sum(e.warning_events for e in ecus.values())
     passive_events = sum(e.passive_events for e in ecus.values())
     bus_off_events = sum(e.bus_off_events for e in ecus.values())
     unique_bus_off_ecus = sum(1 for e in ecus.values() if e.bus_off_events > 0)
-    dropped_during_bus_off = sum(e.dropped_while_bus_off for e in ecus.values())
     total_outage_ms = sum(e.outage_sec for e in ecus.values()) * 1000.0
 
     normal_lost_total = stream_fp_unrescued_lost + dropped_during_bus_off
@@ -992,7 +1044,7 @@ def _merge_sensitivity_csv(
             )
             ref_rows["bus_off_recovery_ms"] = 50.0
             ref_rows = ref_rows[ref_rows["dataset"].isin(combined["dataset"].unique())]
-            combined = pd.concat([ref_rows, combined], ignore_index=True)
+            combined = pd.concat([combined, ref_rows], ignore_index=True)
             combined = combined.drop_duplicates(subset=["dataset", "config_name"], keep="last")
 
     combined = add_relative_baseline_columns(combined)
