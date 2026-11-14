@@ -174,7 +174,11 @@ def run_statistical_analysis(best_models_dict: Dict[str, Dict[str, Dict[str, Any
 
             # 3. Teste Post-Hoc de Tukey HSD
             if anova_p < 0.05 and hasattr(stats, 'tukey_hsd'):
-                print(f"\n3. Teste Post-Hoc Tukey HSD (Avaliação de N bytes equivalentes):")
+                print(
+                    "\n3. Teste Post-Hoc Tukey HSD "
+                    "(Nota: 10 folds compartilham 9/10 do treino e, no Car-Hacking, "
+                    "as mesmas 25k amostras de ataque na validação):"
+                )
                 tukey_res = stats.tukey_hsd(*samples_list)
 
                 # Compara cada iForest_NF com o modelo completo iForest_8F
@@ -182,7 +186,7 @@ def run_statistical_analysis(best_models_dict: Dict[str, Dict[str, Dict[str, Any
                 ref_idx = model_names_list.index(ref_model)
 
                 print(f"   Comparação com o modelo completo de referência ({ref_model}):")
-                equiv_by_n = {8: True}
+                non_sig_by_n = {8: True}
                 for idx, m_name in enumerate(model_names_list):
                     if m_name.startswith('iForest') and m_name != ref_model:
                         p_val = tukey_res.pvalue[ref_idx, idx]
@@ -190,25 +194,66 @@ def run_statistical_analysis(best_models_dict: Dict[str, Dict[str, Dict[str, Any
                         diff = abs(float(np.mean(model_fold_data[ref_model])) - mean_m)
                         n_b = int(m_name.split('_')[1].replace('F', ''))
                         is_valid_acc = mean_m >= 85.0 and n_b >= 2
-                        is_equiv = (p_val > 0.05) and is_valid_acc
-                        equiv_by_n[n_b] = is_equiv
+                        is_non_sig = (p_val > 0.05) and is_valid_acc
+                        non_sig_by_n[n_b] = is_non_sig
                         if mean_m < 85.0:
                             status_str = f"Desconsiderado (< 85% acc: {mean_m:.2f}%)"
                         elif p_val > 0.05:
-                            status_str = "Estatisticamente Equivalente (p > 0.05)"
+                            status_str = "Sem diferença estatisticamente significativa detectada (Tukey p > 0.05)"
                         else:
                             status_str = "Significativamente Diferente (p <= 0.05)"
                         print(f"     - {m_name} vs {ref_model}: p={p_val:.4f}, diff={diff:.3f}% -> {status_str}")
 
-                # Determina o menor N tal que os modelos com N ou mais bytes sejam equivalentes (Seção VI-B)
+                # Determina o menor N sem diferença significativa detectada contra iForest_8F
                 min_equivalent_n = 8
                 for candidate_n in range(7, 1, -1):
-                    if equiv_by_n.get(candidate_n, False):
+                    if non_sig_by_n.get(candidate_n, False):
                         min_equivalent_n = candidate_n
                     else:
                         break
 
-                print(f"   🏆 Recomendação pelo Tukey HSD: iForest_{min_equivalent_n}F utiliza o menor número de bytes (N >= {min_equivalent_n}) com desempenho equivalente a {ref_model}!")
+                print(
+                    f"   🏆 Seleção (critério do artigo + Tukey HSD): iForest_{min_equivalent_n}F "
+                    f"utiliza o menor número de bytes (N >= {min_equivalent_n}) sem diferença significativa "
+                    f"detectada contra {ref_model} (p > 0.05)."
+                )
+
+                # 4. Teste Formal de Equivalência Pareado TOST (Margem +-1,00% pp)
+                tost_margin = 1.00
+                ref_folds = np.asarray(model_fold_data[ref_model], dtype=np.float64)
+                print(
+                    f"\n4. Teste Formal de Equivalência Pareado TOST "
+                    f"(Margem Delta = +-{tost_margin:.2f}% pp vs {ref_model}, alpha=0.05):"
+                )
+                for m_name in model_names_list:
+                    if not (m_name.startswith('iForest') and m_name != ref_model):
+                        continue
+                    cand_folds = np.asarray(model_fold_data[m_name], dtype=np.float64)
+                    if len(cand_folds) != len(ref_folds) or len(cand_folds) < 2:
+                        continue
+                    diffs = cand_folds - ref_folds
+                    n_f = len(diffs)
+                    mean_d = float(np.mean(diffs))
+                    sd_d = float(np.std(diffs, ddof=1))
+                    if sd_d <= 1e-12:
+                        p_tost = 0.0 if abs(mean_d) < tost_margin else 1.0
+                        ci_low, ci_high = mean_d, mean_d
+                    else:
+                        se_d = sd_d / np.sqrt(n_f)
+                        t_lower = (mean_d + tost_margin) / se_d
+                        t_upper = (mean_d - tost_margin) / se_d
+                        p_lower = float(1.0 - stats.t.cdf(t_lower, df=n_f - 1))
+                        p_upper = float(stats.t.cdf(t_upper, df=n_f - 1))
+                        p_tost = max(p_lower, p_upper)
+                        t_crit90 = float(stats.t.ppf(0.95, df=n_f - 1))
+                        ci_low = mean_d - t_crit90 * se_d
+                        ci_high = mean_d + t_crit90 * se_d
+                    eq_label = "Equivalente dentro de +-1,0%" if p_tost < 0.05 else "Inconclusivo/Fora da margem"
+                    print(
+                        f"     - {m_name} - {ref_model}: diff={mean_d:+.3f}% "
+                        f"(IC90% [{ci_low:+.3f}%, {ci_high:+.3f}%]), "
+                        f"p_TOST={p_tost:.4e} -> {eq_label}"
+                    )
 
 
 # ==============================================================================

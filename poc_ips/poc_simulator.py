@@ -7,13 +7,18 @@ Executes genuine 3-thread shared-memory inference:
   - Worker_Stage1 Thread: pre-loaded C-accelerated `iForest_5F` evaluator.
   - Worker_Stage2 Thread: pre-loaded asynchronous C-accelerated `CAN_ID + 8B` evaluator.
 
-Couples the 3-thread IPS to a chronological CAN 2.0A Error-Confinement simulator:
+Couples the 3-thread IPS to a simplified trace-driven CAN 2.0A Error-Confinement
+event model (chronological log playback without global bus rescheduling):
   - Legitimate frames blocked by IPS trigger Active Error Flags (`TEC += 8`) and
-    automatic ECU retransmission (`retransmit_slot_sec = 260 us` at 500 kbps).
+    modeled ECU retransmission (`retransmit_slot_sec = 260 us` at 500 kbps).
   - Successful legitimate transmissions decrement `TEC -= 1` (if `TEC > 0`).
-  - Tracks `Error Warning (>= 96)`, `Error Passive (> 127)`, `Bus-Off (> 255)` events,
-    50 ms AUTOSAR-style Bus-Off recovery windows, dropped telemetry during outages,
-    attack Recall (TP/FN), and Cache 1/Cache 2 hit and memory statistics.
+  - Tracks one TEC state machine per `CAN_ID` as an ECU proxy (raw traces do
+    not include a DBC ECU-to-CAN_ID mapping matrix).
+  - Tracks `Error Warning (>= 96)`, `Error Passive (> 127)`, `Bus-Off (> 255)`
+    events, parameterized ECU Bus-Off recovery windows (50 ms default vs. Bosch
+    CAN 2.0A hardware minimum of 128 x 11 recessive bits ~2.8 ms at 500 kbps),
+    dropped telemetry during outages, attack Recall (TP/FN), and Cache 1/Cache 2
+    hit and memory statistics (lazy per-access TTL eviction + periodic sweep).
 """
 
 from __future__ import annotations
@@ -99,6 +104,63 @@ DEFAULT_SIM_CONFIGS: Tuple[SimulationConfig, ...] = (
     ),
 )
 
+SENSITIVITY_CONFIGS: Tuple[SimulationConfig, ...] = (
+    SimulationConfig(
+        name="Sens_S2Lat_100us",
+        use_stage2=True,
+        use_caches=True,
+        cache1_trigger_count=1,
+        cache2_ttl_sec=0.100,
+        stage2_sim_latency_sec=0.000100,
+        bus_off_recovery_sec=0.050,
+    ),
+    SimulationConfig(
+        name="Sens_S2Lat_300us",
+        use_stage2=True,
+        use_caches=True,
+        cache1_trigger_count=1,
+        cache2_ttl_sec=0.100,
+        stage2_sim_latency_sec=0.000300,
+        bus_off_recovery_sec=0.050,
+    ),
+    SimulationConfig(
+        name="Sens_Rec_3ms",
+        use_stage2=True,
+        use_caches=True,
+        cache1_trigger_count=1,
+        cache2_ttl_sec=0.100,
+        stage2_sim_latency_sec=0.000200,
+        bus_off_recovery_sec=0.003,
+    ),
+    SimulationConfig(
+        name="Sens_Rec_200ms",
+        use_stage2=True,
+        use_caches=True,
+        cache1_trigger_count=1,
+        cache2_ttl_sec=0.100,
+        stage2_sim_latency_sec=0.000200,
+        bus_off_recovery_sec=0.200,
+    ),
+    SimulationConfig(
+        name="Sens_TTL_20ms",
+        use_stage2=True,
+        use_caches=True,
+        cache1_trigger_count=1,
+        cache2_ttl_sec=0.020,
+        stage2_sim_latency_sec=0.000200,
+        bus_off_recovery_sec=0.050,
+    ),
+    SimulationConfig(
+        name="Sens_TTL_500ms",
+        use_stage2=True,
+        use_caches=True,
+        cache1_trigger_count=1,
+        cache2_ttl_sec=0.500,
+        stage2_sim_latency_sec=0.000200,
+        bus_off_recovery_sec=0.050,
+    ),
+)
+
 
 @dataclass
 class Cache1Entry:
@@ -121,7 +183,7 @@ class Cache2Entry:
 
 @dataclass
 class EcuErrorState:
-    """CAN 2.0A Transmit Error Counter (TEC) state for one legitimate ECU (CAN_ID)."""
+    """CAN 2.0A Transmit Error Counter (TEC) state per CAN_ID (ECU proxy without DBC)."""
 
     tec: int = 0
     max_tec: int = 0
@@ -897,19 +959,69 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Merge partial simulation CSVs into --out-csv and regenerate plots without re-simulating.",
     )
+    parser.add_argument(
+        "--sensitivity",
+        action="store_true",
+        help="Run single-factor sensitivity sweep (latency, recovery, TTL) to poc_sensitivity_results.csv.",
+    )
     return parser.parse_args()
+
+
+def _merge_sensitivity_csv(
+    csv_path: str,
+    new_df: pd.DataFrame,
+    baseline_csv_path: str,
+) -> pd.DataFrame:
+    """Upsert sensitivity rows by (dataset, config_name) and attach baseline deltas."""
+    if os.path.exists(csv_path):
+        existing = pd.read_csv(csv_path)
+        combined = pd.concat([existing, new_df], ignore_index=True)
+        combined = combined.drop_duplicates(subset=["dataset", "config_name"], keep="last")
+    else:
+        combined = new_df.copy()
+
+    # Attach Baseline_5F & Proposed_DualCache_100ms rows when computing relative columns
+    if os.path.exists(baseline_csv_path):
+        base_df = pd.read_csv(baseline_csv_path)
+        ref_rows = base_df[
+            base_df["config_name"].isin(["Baseline_5F", "Proposed_DualCache_100ms"])
+        ].copy()
+        if not ref_rows.empty:
+            ref_rows["stage2_sim_latency_us"] = np.where(
+                ref_rows["config_name"] == "Proposed_DualCache_100ms", 200.0, 0.0
+            )
+            ref_rows["bus_off_recovery_ms"] = 50.0
+            ref_rows = ref_rows[ref_rows["dataset"].isin(combined["dataset"].unique())]
+            combined = pd.concat([ref_rows, combined], ignore_index=True)
+            combined = combined.drop_duplicates(subset=["dataset", "config_name"], keep="last")
+
+    combined = add_relative_baseline_columns(combined)
+    combined.to_csv(csv_path, index=False)
+    return combined
 
 
 def main() -> None:
     args = parse_args()
     os.makedirs(POC_RESULTS_DIR, exist_ok=True)
 
-    csv_out = args.out_csv
+    default_main_csv = os.path.join(POC_RESULTS_DIR, "poc_simulation_results.csv")
+    default_sens_csv = os.path.join(POC_RESULTS_DIR, "poc_sensitivity_results.csv")
+    csv_out = default_sens_csv if (args.sensitivity and args.out_csv == default_main_csv) else args.out_csv
     fig_out = os.path.join(POC_RESULTS_DIR, "fig_poc_comparison.png")
     fig_s2_out = os.path.join(POC_RESULTS_DIR, "fig_stage2_cascade.png")
     stage2_csv = os.path.join(POC_RESULTS_DIR, "stage2_test_comparison.csv")
 
     if args.merge_inputs is not None:
+        if args.sensitivity:
+            parts = [pd.read_csv(p) for p in args.merge_inputs]
+            combined_df = _merge_sensitivity_csv(
+                csv_out,
+                pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(),
+                default_main_csv,
+            )
+            print(f"Merged sensitivity CSV -> {csv_out} ({len(combined_df)} rows)")
+            return
+
         combined_df = pd.read_csv(csv_out) if os.path.exists(csv_out) else pd.DataFrame()
         for partial_path in args.merge_inputs:
             part_df = pd.read_csv(partial_path)
@@ -926,8 +1038,16 @@ def main() -> None:
         print(f"Saved figures -> {fig_out}, {fig_s2_out}")
         return
 
-    cfg_map = {c.name: c for c in DEFAULT_SIM_CONFIGS}
-    selected_cfgs = [cfg_map[name] for name in args.configs]
+    if args.sensitivity:
+        sens_map = {c.name: c for c in SENSITIVITY_CONFIGS}
+        default_names = [c.name for c in DEFAULT_SIM_CONFIGS]
+        if args.configs == default_names:
+            selected_cfgs = list(SENSITIVITY_CONFIGS)
+        else:
+            selected_cfgs = [sens_map[name] for name in args.configs]
+    else:
+        cfg_map = {c.name: c for c in DEFAULT_SIM_CONFIGS}
+        selected_cfgs = [cfg_map[name] for name in args.configs]
 
     all_rows: List[Dict[str, Any]] = []
     for ds_name in args.datasets:
@@ -950,6 +1070,9 @@ def main() -> None:
                 fast_s1=fast_s1,
                 fast_s2=fast_s2 if sim_cfg.use_stage2 else None,
             )
+            if args.sensitivity:
+                row["stage2_sim_latency_us"] = sim_cfg.stage2_sim_latency_sec * 1e6
+                row["bus_off_recovery_ms"] = sim_cfg.bus_off_recovery_sec * 1e3
             all_rows.append(row)
             print(
                 f"  [{sim_cfg.name}] wall={row['wall_time_sec']:.2f}s | "
@@ -965,11 +1088,14 @@ def main() -> None:
         gc.collect()
 
     new_df = pd.DataFrame(all_rows)
-    combined_df = merge_simulation_csv(csv_out, new_df, args.datasets)
-    if not args.no_plot:
-        plot_poc_comparison(combined_df, fig_out)
-        plot_stage2_cascade_summary(stage2_csv, fig_s2_out)
-        print(f"Saved comparison figures -> {fig_out}, {fig_s2_out}")
+    if args.sensitivity:
+        combined_df = _merge_sensitivity_csv(csv_out, new_df, default_main_csv)
+    else:
+        combined_df = merge_simulation_csv(csv_out, new_df, args.datasets)
+        if not args.no_plot:
+            plot_poc_comparison(combined_df, fig_out)
+            plot_stage2_cascade_summary(stage2_csv, fig_s2_out)
+            print(f"Saved comparison figures -> {fig_out}, {fig_s2_out}")
     print(f"\nSaved simulation summary -> {csv_out}")
 
 

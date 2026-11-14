@@ -93,18 +93,78 @@ class CheckpointManager:
     retomar a execução ignorando combinações já finalizadas.
     """
 
-    def __init__(self, cv_csv_path: str, test_csv_path: str, resume: bool = True):
+    def __init__(
+        self,
+        cv_csv_path: str,
+        test_csv_path: str,
+        resume: bool = True,
+        expected_metadata: Optional[Dict[str, Any]] = None,
+        strict_checkpoint: bool = False,
+        logger: Optional[logging.Logger] = None,
+    ):
         self.cv_csv_path = cv_csv_path
         self.test_csv_path = test_csv_path
+        self.meta_path = os.path.join(os.path.dirname(self.cv_csv_path), "checkpoint_meta.json")
         self.resume = resume
+        self.expected_metadata = expected_metadata
+        self.strict_checkpoint = strict_checkpoint
+        self.logger = logger
         self.completed_cv_keys = set()
         self.completed_test_keys = set()
 
         os.makedirs(os.path.dirname(self.cv_csv_path), exist_ok=True)
         os.makedirs(os.path.dirname(self.test_csv_path), exist_ok=True)
 
+        self._validate_checkpoint_metadata()
         self._init_cv_csv()
         self._init_test_csv()
+
+    def _warn_or_fail(self, msg: str) -> None:
+        if self.logger is not None:
+            self.logger.warning(msg)
+        else:
+            print(f"[CHECKPOINT WARNING] {msg}")
+        if self.strict_checkpoint:
+            raise RuntimeError(msg)
+
+    def _validate_checkpoint_metadata(self) -> None:
+        """Valida se seed, cv_folds, grade e fingerprints de datasets batem ao retomar CSV."""
+        if not self.expected_metadata:
+            return
+
+        if os.path.exists(self.cv_csv_path) and self.resume:
+            if os.path.exists(self.meta_path):
+                try:
+                    with open(self.meta_path, 'r', encoding='utf-8') as f:
+                        saved = json.load(f)
+                    for key in ('cv_folds', 'random_state', 'grid_preset', 'primary_metric'):
+                        if saved.get(key) != self.expected_metadata.get(key):
+                            self._warn_or_fail(
+                                f"Divergência de '{key}' no checkpoint ({saved.get(key)} != {self.expected_metadata.get(key)})."
+                            )
+                    saved_fps = saved.get('dataset_fingerprints', {})
+                    cur_fps = self.expected_metadata.get('dataset_fingerprints', {})
+                    for ds_name, cur_fp in cur_fps.items():
+                        if ds_name in saved_fps:
+                            for fk in ('file_size_bytes', 'head_sha256', 'split_config'):
+                                if saved_fps[ds_name].get(fk) != cur_fp.get(fk):
+                                    self._warn_or_fail(
+                                        f"Fingerprint de '{ds_name}' diverge em '{fk}' contra checkpoint salvo."
+                                    )
+                except RuntimeError:
+                    raise
+                except (OSError, ValueError) as exc:
+                    self._warn_or_fail(f"Falha ao ler '{self.meta_path}': {exc}")
+            else:
+                msg = (
+                    f"Checkpoint CSV '{self.cv_csv_path}' não possui 'checkpoint_meta.json' "
+                    "(artefato legado); retomada preservada."
+                )
+                if self.logger is not None:
+                    self.logger.info(msg)
+        elif not os.path.exists(self.cv_csv_path) or not self.resume:
+            with open(self.meta_path, 'w', encoding='utf-8') as f:
+                json.dump(self.expected_metadata, f, indent=2, sort_keys=True)
 
     def _init_cv_csv(self):
         cv_headers = [
@@ -123,6 +183,17 @@ class CheckpointManager:
                 f.write(",".join(cv_headers) + "\n")
         elif self.resume:
             df = pd.read_csv(self.cv_csv_path)
+            if (
+                self.expected_metadata
+                and 'cv_folds' in df.columns
+                and not df.empty
+                and 'cv_folds' in self.expected_metadata
+            ):
+                existing_folds = {int(v) for v in df['cv_folds'].dropna().unique()}
+                if int(self.expected_metadata['cv_folds']) not in existing_folds:
+                    self._warn_or_fail(
+                        f"cv_folds={self.expected_metadata['cv_folds']} diverge do CSV existente ({sorted(existing_folds)})."
+                    )
             for _, row in df.iterrows():
                 key = (str(row['dataset']), str(row['model_name']), str(row['params_json']))
                 self.completed_cv_keys.add(key)
@@ -388,7 +459,8 @@ def run_experiment_pipeline(
     models_dir: str = config.MODELS_DIR,
     save_models: bool = False,
     force_test: bool = False,
-    random_state: int = config.DEFAULT_SEED
+    random_state: int = config.DEFAULT_SEED,
+    strict_checkpoint: bool = False,
 ):
     """
     Executa o pipeline completo de experimentos com salvamento incremental e logs.
@@ -412,7 +484,26 @@ def run_experiment_pipeline(
 
     cv_csv_path = os.path.join(output_dir, "cv_grid_search_results.csv")
     test_csv_path = os.path.join(output_dir, "final_test_results.csv")
-    cp_manager = CheckpointManager(cv_csv_path, test_csv_path, resume=resume)
+    dataset_fingerprints = {}
+    for dname in datasets:
+        ds_file = utils.DATASET_PATHS.get(dname, '')
+        if ds_file and os.path.exists(ds_file):
+            dataset_fingerprints[dname] = utils.compute_dataset_fingerprint(dname, random_state=random_state)
+    expected_metadata = {
+        "cv_folds": int(cv_folds),
+        "random_state": int(random_state),
+        "grid_preset": str(grid_preset),
+        "primary_metric": str(config.PRIMARY_METRIC),
+        "dataset_fingerprints": dataset_fingerprints,
+    }
+    cp_manager = CheckpointManager(
+        cv_csv_path,
+        test_csv_path,
+        resume=resume,
+        expected_metadata=expected_metadata,
+        strict_checkpoint=strict_checkpoint,
+        logger=logger,
+    )
 
     param_grids = config.GRID_PRESETS[grid_preset]
 
@@ -696,6 +787,14 @@ def parse_args():
         "--force_test", action="store_true", default=False,
         help="Força re-avaliação do melhor modelo no conjunto de teste mesmo se já concluído anteriormente"
     )
+    parser.add_argument(
+        "--seed", type=int, default=config.DEFAULT_SEED,
+        help="Semente aleatória para partições e modelos"
+    )
+    parser.add_argument(
+        "--strict-checkpoint", action="store_true", default=False,
+        help="Aborta se metadados do checkpoint (seed, cv_folds, dataset) divergirem"
+    )
     return parser.parse_args()
 
 
@@ -715,5 +814,7 @@ if __name__ == "__main__":
         log_dir=args.log_dir,
         models_dir=args.models_dir,
         save_models=args.save_models,
-        force_test=args.force_test
+        force_test=args.force_test,
+        random_state=args.seed,
+        strict_checkpoint=args.strict_checkpoint,
     )

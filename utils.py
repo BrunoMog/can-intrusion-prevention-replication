@@ -18,9 +18,11 @@ Este módulo centraliza todas as rotinas utilitárias para:
 
 import os
 import csv
+import json
 import time
+import hashlib
 from collections import Counter
-from typing import Dict, List, Tuple, Optional, Union
+from typing import Any, Dict, List, Tuple, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -273,11 +275,37 @@ def audit_against_paper_table_2(datasets_dict: Optional[Dict[str, str]] = None) 
 # 2. SISTEMA DE INDEXAÇÃO E PARTICIONAMENTO REPRODUZÍVEL COM CACHE (.NPZ)
 # ==============================================================================
 
+def compute_dataset_fingerprint(
+    filepath_or_name: str,
+    random_state: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Computa impressão digital leve (tamanho, mtime, SHA-256 do cabeçalho e split_config)."""
+    resolved = _resolve_filepath(filepath_or_name)
+    if not os.path.exists(resolved):
+        raise FileNotFoundError(f"Arquivo não encontrado para fingerprint: {resolved}")
+    st = os.stat(resolved)
+    h = hashlib.sha256()
+    with open(resolved, 'rb') as f:
+        h.update(f.read(65536))
+    meta: Dict[str, Any] = {
+        'filepath': os.path.abspath(resolved),
+        'basename': os.path.basename(resolved),
+        'file_size_bytes': int(st.st_size),
+        'file_mtime_ns': int(st.st_mtime_ns),
+        'head_sha256': h.hexdigest(),
+        'split_config': _get_split_config(filepath_or_name),
+    }
+    if random_state is not None:
+        meta['random_state'] = int(random_state)
+    return meta
+
+
 def get_split_indices(
     filepath_or_name: str,
     random_state: int = 42,
     cache_dir: str = "splits_cache",
-    force_recompute: bool = False
+    force_recompute: bool = False,
+    strict_fingerprint: bool = False,
 ) -> Dict[str, np.ndarray]:
     """
     Retorna os índices das linhas correspondentes aos conjuntos de Treino, Validação e Teste
@@ -300,10 +328,34 @@ def get_split_indices(
     
     base_name = os.path.splitext(os.path.basename(filepath))[0]
     cache_path = os.path.join(cache_dir, f"{base_name}_splits_seed{random_state}.npz")
-    
+    meta_path = f"{cache_path}.meta.json"
+    current_fp = compute_dataset_fingerprint(filepath_or_name, random_state=random_state)
+
     if os.path.exists(cache_path) and not force_recompute:
-        loaded = np.load(cache_path)
-        return {key: loaded[key] for key in loaded.files}
+        cache_valid = True
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, 'r', encoding='utf-8') as mf:
+                    saved_fp = json.load(mf)
+                mismatches = [
+                    k
+                    for k in ('file_size_bytes', 'head_sha256', 'random_state', 'split_config')
+                    if saved_fp.get(k) != current_fp.get(k)
+                ]
+                if mismatches:
+                    print(
+                        f" [CACHE WARNING] '{cache_path}' diverge em {mismatches} "
+                        f"para '{os.path.basename(filepath)}'."
+                    )
+                    if strict_fingerprint:
+                        cache_valid = False
+            except (OSError, ValueError) as exc:
+                print(f" [CACHE WARNING] Falha ao ler '{meta_path}': {exc}")
+                if strict_fingerprint:
+                    cache_valid = False
+        if cache_valid:
+            loaded = np.load(cache_path)
+            return {key: loaded[key] for key in loaded.files}
 
     print(f"Indexando frames para partição metodológica em '{os.path.basename(filepath)}'...")
     t0 = time.time()
@@ -374,8 +426,10 @@ def get_split_indices(
         'test_indices': test_indices
     }
 
-    # Salva cache comprimido
+    # Salva cache comprimido e metadados de integridade
     np.savez_compressed(cache_path, **split_dict)
+    with open(meta_path, 'w', encoding='utf-8') as mf:
+        json.dump(current_fp, mf, indent=2, sort_keys=True)
     elapsed = time.time() - t0
     print(f" -> Indexação concluída e salva em '{cache_path}' em {elapsed:.2f}s.")
     return split_dict
